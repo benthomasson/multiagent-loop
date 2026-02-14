@@ -4,42 +4,75 @@ A multi-agent automated software development workflow using Claude CLI.
 
 ## Philosophy: Claude Is Your User
 
-The key insight: the **User** agent isn't simulating user stories—it actually runs the code, hits errors, and provides real UX feedback. This collapses the feedback loop from weeks to seconds.
+The key insight: the **User** agent isn't simulating user stories—it actually runs the code, hits errors, and provides real UX feedback. At the end of each iteration, it asks: **"What would make my job easier?"**
 
-When AI is the user, you get:
-- **Immediate feedback** on confusing error messages
-- **Zero-cost usability testing** - if AI struggles, humans will too
-- **Precise articulation** of what's broken and what information was missing
+Those feature requests go back to the Planner, who decides which are worth implementing. The loop continues until the User is satisfied.
 
-## Architecture
+## Communication Flow
 
 ```
-┌─────────────┐
-│  Supervisor │  Orchestrates the pipeline
-└──────┬──────┘
-       │
-       ▼
-┌──────────┐    ┌─────────────┐    ┌──────────┐    ┌────────┐    ┌──────┐
-│ Planner  │ ─▶ │ Implementer │ ─▶ │ Reviewer │ ─▶ │ Tester │ ─▶ │ User │
-└──────────┘    └─────────────┘    └──────────┘    └────────┘    └──────┘
-   agents/          agents/           agents/        agents/      agents/
-   planner/         implementer/      reviewer/      tester/      user/
+┌─────────────────────────────────────────────────────────────────────┐
+│                           SUPERVISOR                                 │
+│                    (orchestrates iterations)                         │
+└─────────────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│  PLANNER (PM + Architect)                                           │
+│  • Decides WHAT and WHY                                             │
+│  • Suggests HOW (but implementer has final say)                     │
+│  • Receives feature requests from User                              │
+│  • Decides which requests are worth implementing                    │
+└─────────────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│  IMPLEMENTER                                                         │
+│  • Has ULTIMATE CONTROL of HOW                                       │
+│  • Can push back on planner if approach won't work                  │
+│  • Writes code with clear error messages                            │
+└─────────────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│  REVIEWER                                                            │
+│  • Feedback to implementer (correctness, errors, usability)         │
+│  • Feed-forward to tester (what to test, edge cases)                │
+│  • Verdict: APPROVED or NEEDS_CHANGES                               │
+└─────────────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│  TESTER                                                              │
+│  • Creates tests based on reviewer notes                            │
+│  • Documents HOW TO USE the software                                │
+│  • Provides usage instructions to User                              │
+└─────────────────────────────────────────────────────────────────────┘
+                                 │
+                                 ▼
+┌─────────────────────────────────────────────────────────────────────┐
+│  USER (Claude)                                                       │
+│  • Actually RUNS the code following tester instructions             │
+│  • Reports what worked, what failed, what was confusing             │
+│  • Requests features: "What would make my job easier?"              │
+│  • Verdict: SATISFIED or NEEDS_IMPROVEMENT                          │
+└─────────────────────────────────────────────────────────────────────┘
+                                 │
+                                 │ (if NEEDS_IMPROVEMENT)
+                                 ▼
+                        [loops back to PLANNER]
 ```
-
-### Roles
-
-- **Planner** - Analyzes requirements, designs the solution, breaks into tasks
-- **Implementer** - Writes the code based on the plan
-- **Reviewer** - Reviews for correctness, error handling, and usability
-- **Tester** - Creates and runs tests, identifies edge cases
-- **User** - Actually uses the code, reports friction points and missing information
 
 ## Usage
 
 ### Run the full pipeline
 
 ```bash
+cd ~/git/multiagent-loop
 uv run supervisor.py "write a function to calculate fibonacci numbers"
+
+# With iteration limit
+uv run supervisor.py "build a CLI calculator" --max-iterations 5
 ```
 
 ### Run individual agents
@@ -58,7 +91,7 @@ uv run agent.py planner -c "what about error handling?"
 ```
 multiagent-loop/
 ├── agent.py           # Agent runner utility
-├── supervisor.py      # Pipeline orchestrator
+├── supervisor.py      # Pipeline orchestrator with feedback loop
 ├── agents/            # Agent directories (session isolation)
 │   ├── planner/
 │   ├── implementer/
@@ -72,28 +105,32 @@ multiagent-loop/
 
 1. **Session Isolation**: Each agent has its own directory. Claude CLI stores conversation history per directory, so each agent maintains its own context.
 
-2. **Pipeline Stages**: The supervisor passes output from each stage to the next. The User stage is critical—it provides real feedback from actually using the code.
+2. **Feedback Loop**: User feedback triggers new iterations. The Planner reviews feature requests and decides which to implement.
 
-3. **Feedback Loop**: User feedback can trigger another iteration (planner revises, implementer fixes, etc.).
+3. **Convergence**: Loop ends when User is SATISFIED or max iterations reached.
 
-## Designing for AI as User
+## Key Principles
 
-When AI is the primary user, different things matter:
+### Planner vs Implementer
 
-**Error Messages:**
-```
-# Human-first (bad for AI)
-"Connection failed"
+- **Planner** decides WHAT and WHY, suggests HOW
+- **Implementer** has ultimate control of HOW, can push back
+- This separation prevents the planner from dictating impossible approaches
 
-# AI-first (good for debugging)
-"SSH connection to 'web01' failed: authentication rejected.
- Tried: [publickey]. Expected key at ~/.ssh/id_rsa (exists: true, permissions: 0600).
- Server offered: [publickey, password]."
-```
+### Reviewer Feed-Forward
 
-**Output:** Structured JSON with consistent schemas, not pretty tables.
+The reviewer doesn't just approve/reject—they provide **feed-forward** to the tester:
+- What behaviors need testing
+- Edge cases to consider
+- Areas of concern
 
-**Validation:** Fail fast with pre-flight checks, enumerate all issues upfront.
+### Tester as Documenter
+
+The tester's job isn't just testing—it's **documenting how to use the software**. The User follows these instructions, making gaps in documentation immediately visible.
+
+### User Feature Requests
+
+The User asks: "What would make my job easier?" These requests go to the Planner, who decides if they're worth implementing. This closes the loop.
 
 ## Requirements
 
