@@ -4,9 +4,39 @@ A multi-agent automated software development workflow using Claude CLI.
 
 ## Philosophy: Claude Is Your User
 
-The key insight: the **User** agent isn't simulating user stories—it actually runs the code, hits errors, and provides real UX feedback. At the end of each iteration, it asks: **"What would make my job easier?"**
+The key insight: the **User** agent isn't simulating user stories—it actually runs the code, hits errors, and provides real UX feedback. At the end of each stage, every agent asks: **"What would make my job easier?"**
 
 Those feature requests go back to the Planner, who decides which are worth implementing. The loop continues until the User is satisfied.
+
+## Key Features
+
+### Git Coordination
+
+Every stage commits to git, providing:
+- **Checkpoints** - Recovery points if something goes wrong
+- **Audit trail** - Full history of what each agent did and why
+- **Visibility** - Human can review commits at any time
+- **Async review** - Artifacts persist for later inspection
+
+```
+[supervisor] Start task: ...
+[planner] Plan for: ...
+[implementer] Implement: fibonacci.py
+[reviewer] Code review complete
+[tester] Tests and usage documentation
+[user] User feedback and feature requests
+[supervisor] Iteration 1 complete
+```
+
+### Self-Review at Each Stage
+
+Every agent reflects after completing their work:
+1. What went well?
+2. What information was missing?
+3. What would make my job easier next time?
+4. Confidence level / concerns for next stage
+
+This surfaces friction points and improvement ideas throughout the pipeline, not just at the end.
 
 ## Communication Flow
 
@@ -22,7 +52,8 @@ Those feature requests go back to the Planner, who decides which are worth imple
 │  • Decides WHAT and WHY                                             │
 │  • Suggests HOW (but implementer has final say)                     │
 │  • Receives feature requests from User                              │
-│  • Decides which requests are worth implementing                    │
+│  • Self-review: What would make planning easier?                    │
+│  → [git commit: PLAN.md]                                            │
 └─────────────────────────────────────────────────────────────────────┘
                                  │
                                  ▼
@@ -31,6 +62,8 @@ Those feature requests go back to the Planner, who decides which are worth imple
 │  • Has ULTIMATE CONTROL of HOW                                       │
 │  • Can push back on planner if approach won't work                  │
 │  • Writes code with clear error messages                            │
+│  • Self-review: What was unclear in the plan?                       │
+│  → [git commit: implementation files]                               │
 └─────────────────────────────────────────────────────────────────────┘
                                  │
                                  ▼
@@ -39,6 +72,8 @@ Those feature requests go back to the Planner, who decides which are worth imple
 │  • Feedback to implementer (correctness, errors, usability)         │
 │  • Feed-forward to tester (what to test, edge cases)                │
 │  • Verdict: APPROVED or NEEDS_CHANGES                               │
+│  • Self-review: What made review difficult?                         │
+│  → [git commit: REVIEW.md]                                          │
 └─────────────────────────────────────────────────────────────────────┘
                                  │
                                  ▼
@@ -47,6 +82,8 @@ Those feature requests go back to the Planner, who decides which are worth imple
 │  • Creates tests based on reviewer notes                            │
 │  • Documents HOW TO USE the software                                │
 │  • Provides usage instructions to User                              │
+│  • Self-review: What gaps did testing reveal?                       │
+│  → [git commit: tests + USAGE.md]                                   │
 └─────────────────────────────────────────────────────────────────────┘
                                  │
                                  ▼
@@ -56,6 +93,7 @@ Those feature requests go back to the Planner, who decides which are worth imple
 │  • Reports what worked, what failed, what was confusing             │
 │  • Requests features: "What would make my job easier?"              │
 │  • Verdict: SATISFIED or NEEDS_IMPROVEMENT                          │
+│  → [git commit: USER_FEEDBACK.md]                                   │
 └─────────────────────────────────────────────────────────────────────┘
                                  │
                                  │ (if NEEDS_IMPROVEMENT)
@@ -73,6 +111,15 @@ uv run supervisor.py "write a function to calculate fibonacci numbers"
 
 # With iteration limit
 uv run supervisor.py "build a CLI calculator" --max-iterations 5
+```
+
+### View the git history
+
+After a run, check the workspace:
+
+```bash
+cd workspace
+git log --oneline
 ```
 
 ### Run individual agents
@@ -98,39 +145,45 @@ multiagent-loop/
 │   ├── reviewer/
 │   ├── tester/
 │   └── user/
-└── workspace/         # Output directory for generated code
+└── workspace/         # Output directory (git repo with artifacts)
+    ├── .git/          # Full commit history
+    ├── TASK.md        # Original task
+    ├── PLAN.md        # Planner output
+    ├── IMPLEMENTATION.md
+    ├── REVIEW.md
+    ├── USAGE.md
+    ├── USER_FEEDBACK.md
+    ├── ITERATION_*_SUMMARY.md
+    ├── FINAL_SUMMARY.md
+    └── *.py           # Generated code files
 ```
 
 ## How It Works
 
 1. **Session Isolation**: Each agent has its own directory. Claude CLI stores conversation history per directory, so each agent maintains its own context.
 
-2. **Feedback Loop**: User feedback triggers new iterations. The Planner reviews feature requests and decides which to implement.
+2. **Git Coordination**: Every stage commits artifacts. This provides checkpoints, audit trail, and async review capability.
 
-3. **Convergence**: Loop ends when User is SATISFIED or max iterations reached.
+3. **Self-Review**: Each agent reflects on their work, surfacing friction points and improvement ideas.
 
-## Key Principles
+4. **Feedback Loop**: User feedback triggers new iterations. The Planner reviews feature requests and decides which to implement.
 
-### Planner vs Implementer
+5. **Convergence**: Loop ends when User is SATISFIED or max iterations reached.
 
-- **Planner** decides WHAT and WHY, suggests HOW
-- **Implementer** has ultimate control of HOW, can push back
-- This separation prevents the planner from dictating impossible approaches
+## Artifacts Generated
 
-### Reviewer Feed-Forward
-
-The reviewer doesn't just approve/reject—they provide **feed-forward** to the tester:
-- What behaviors need testing
-- Edge cases to consider
-- Areas of concern
-
-### Tester as Documenter
-
-The tester's job isn't just testing—it's **documenting how to use the software**. The User follows these instructions, making gaps in documentation immediately visible.
-
-### User Feature Requests
-
-The User asks: "What would make my job easier?" These requests go to the Planner, who decides if they're worth implementing. This closes the loop.
+| File | Created By | Purpose |
+|------|------------|---------|
+| `TASK.md` | Supervisor | Original task description |
+| `PLAN.md` | Planner | Requirements, design decisions, success criteria |
+| `IMPLEMENTATION.md` | Implementer | Implementation notes and self-review |
+| `*.py` | Implementer | Generated code files |
+| `REVIEW.md` | Reviewer | Code review with feedback and feed-forward |
+| `USAGE.md` | Tester | Usage instructions for the User |
+| `test_*.py` | Tester | Test files |
+| `USER_FEEDBACK.md` | User | Usage report and feature requests |
+| `ITERATION_N_SUMMARY.md` | Supervisor | Per-iteration summary |
+| `FINAL_SUMMARY.md` | Supervisor | Final status and history |
 
 ## Requirements
 
