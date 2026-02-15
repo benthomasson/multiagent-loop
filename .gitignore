@@ -1,6 +1,8 @@
 # Agent runtime directories
 /workspace/
 /agents/
+/pids/
+/workspace*/
 
 # Python
 __pycache__/

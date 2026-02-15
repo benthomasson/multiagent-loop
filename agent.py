@@ -31,6 +31,7 @@ from datetime import datetime
 AGENTS_DIR = Path(__file__).parent / "agents"
 WORKSPACE = Path(__file__).parent / "workspace"
 LOG_FILE = Path(__file__).parent / "multiagent.log"
+PIDS_DIR = Path(__file__).parent / "pids"
 
 # Logging
 VERBOSE = True
@@ -56,6 +57,80 @@ def log(msg: str, level: str = "INFO"):
     # Print to stderr if verbose or error/warn
     if VERBOSE or level in ["ERROR", "WARN"]:
         print(log_line, file=sys.stderr)
+
+# PID file management
+def write_pid(role: str, pid: int) -> Path:
+    """Write PID file for an agent."""
+    PIDS_DIR.mkdir(parents=True, exist_ok=True)
+    pid_file = PIDS_DIR / f"{role}.pid"
+    pid_file.write_text(str(pid))
+    log(f"Wrote PID {pid} to {pid_file}")
+    return pid_file
+
+
+def read_pid(role: str) -> int | None:
+    """Read PID for an agent, returns None if not running."""
+    pid_file = PIDS_DIR / f"{role}.pid"
+    if not pid_file.exists():
+        return None
+    try:
+        pid = int(pid_file.read_text().strip())
+        # Check if process is still running
+        os.kill(pid, 0)  # Signal 0 just checks if process exists
+        return pid
+    except (ValueError, ProcessLookupError, PermissionError):
+        # Invalid PID or process not running
+        pid_file.unlink(missing_ok=True)
+        return None
+
+
+def clear_pid(role: str) -> None:
+    """Remove PID file for an agent."""
+    pid_file = PIDS_DIR / f"{role}.pid"
+    if pid_file.exists():
+        pid_file.unlink()
+        log(f"Cleared PID file for {role}")
+
+
+def kill_agent(role: str, signal_num: int = 15) -> bool:
+    """Kill an agent process by role. Returns True if killed."""
+    pid = read_pid(role)
+    if pid is None:
+        print(f"No running process found for {role}")
+        return False
+    try:
+        os.kill(pid, signal_num)
+        print(f"Sent signal {signal_num} to {role} (PID {pid})")
+        clear_pid(role)
+        return True
+    except ProcessLookupError:
+        print(f"Process {pid} for {role} not found")
+        clear_pid(role)
+        return False
+    except PermissionError:
+        print(f"Permission denied to kill {role} (PID {pid})")
+        return False
+
+
+def kill_all_agents(signal_num: int = 15) -> dict:
+    """Kill all running agent processes."""
+    results = {}
+    for role in AGENT_PERMISSIONS.keys():
+        results[role] = kill_agent(role, signal_num)
+    return results
+
+
+def show_status() -> None:
+    """Show status of all agents."""
+    print("Agent Status:")
+    print("-" * 60)
+    for role in AGENT_PERMISSIONS.keys():
+        pid = read_pid(role)
+        if pid:
+            print(f"  {role}: RUNNING (PID {pid})")
+        else:
+            print(f"  {role}: not running")
+
 
 # Agent permissions configuration
 AGENT_PERMISSIONS = {
@@ -304,16 +379,36 @@ Write any output files to this directory.
     log(f"Running claude command for {role}")
     log(f"Command: claude -p '<prompt>' --allowedTools {','.join(permissions.get('allowed_tools', []))}")
 
-    result = subprocess.run(
+    # Use Popen to capture PID for monitoring/killing
+    process = subprocess.Popen(
         cmd,
-        capture_output=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
         text=True,
         env=env,
         cwd=agent_session_dir
     )
 
-    log(f"Claude returned with code {result.returncode}")
-    output = result.stdout.strip()
+    # Write PID file so we can kill if needed
+    write_pid(role, process.pid)
+
+    try:
+        stdout, stderr = process.communicate()
+        returncode = process.returncode
+    finally:
+        # Always clean up PID file when done
+        clear_pid(role)
+
+    log(f"Claude returned with code {returncode}")
+    output = stdout.strip()
+
+    # Update result references for rest of function
+    class Result:
+        pass
+    result = Result()
+    result.returncode = returncode
+    result.stdout = stdout
+    result.stderr = stderr
 
     if result.stderr:
         log(f"Stderr: {result.stderr[:200]}", "WARN" if result.returncode == 0 else "ERROR")
@@ -378,8 +473,35 @@ if __name__ == "__main__":
         print(f"       {sys.argv[0]} <role> -c <message>  (continue session)")
         print(f"       {sys.argv[0]} --permissions  (show agent permissions)")
         print(f"       {sys.argv[0]} --branches     (show workspace branches)")
+        print(f"       {sys.argv[0]} --status       (show running agents)")
+        print(f"       {sys.argv[0]} --kill <role>  (kill a running agent)")
+        print(f"       {sys.argv[0]} --kill-all     (kill all running agents)")
         print(f"\nAvailable roles: {', '.join(list_agents())}")
         sys.exit(1)
+
+    if sys.argv[1] == "--status":
+        show_status()
+        sys.exit(0)
+
+    if sys.argv[1] == "--kill":
+        if len(sys.argv) < 3:
+            print("Error: role required for --kill")
+            sys.exit(1)
+        role = sys.argv[2]
+        signal_num = 15  # SIGTERM
+        if len(sys.argv) > 3 and sys.argv[3] == "-9":
+            signal_num = 9  # SIGKILL
+        kill_agent(role, signal_num)
+        sys.exit(0)
+
+    if sys.argv[1] == "--kill-all":
+        signal_num = 15
+        if len(sys.argv) > 2 and sys.argv[2] == "-9":
+            signal_num = 9
+        results = kill_all_agents(signal_num)
+        killed = sum(1 for v in results.values() if v)
+        print(f"Killed {killed} agent(s)")
+        sys.exit(0)
 
     if sys.argv[1] == "--permissions":
         show_permissions()

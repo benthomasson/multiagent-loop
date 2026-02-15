@@ -90,7 +90,8 @@ def save_artifact(name: str, content: str) -> Path:
     path.write_text(content)
     return path
 
-def planner(task: str, user_feedback: str | None = None, shared_understanding: str | None = None) -> dict:
+def planner(task: str, user_feedback: str | None = None, shared_understanding: str | None = None,
+            iteration: int = 1, continue_conversations: bool = False) -> dict:
     """
     Planner: Product Manager + Architect
     Decides WHAT and WHY, suggests HOW.
@@ -149,7 +150,7 @@ Be concise and actionable. The implementer may push back on the HOW.
 If you need clarification or are stuck, you can escalate to a human:
 QUESTION FOR HUMAN: [your question here]"""
 
-    response = run_agent("planner", prompt)
+    response = run_agent("planner", prompt, continue_session=(continue_conversations or iteration > 1))
 
     # Save plan to workspace
     save_artifact("PLAN.md", f"# Plan\n\nTask: {task}\n\n{response}")
@@ -161,7 +162,8 @@ QUESTION FOR HUMAN: [your question here]"""
     }
 
 
-def implementer(plan: str, task: str, reviewer_feedback: str | None = None) -> dict:
+def implementer(plan: str, task: str, reviewer_feedback: str | None = None,
+                iteration: int = 1, continue_conversations: bool = False) -> dict:
     """
     Implementer: Has ultimate control of HOW.
     Can push back on planner if the suggested approach won't work.
@@ -209,7 +211,7 @@ Provide the implementation code in fenced code blocks with filenames.
 If you need clarification or are stuck, escalate to a human:
 QUESTION FOR HUMAN: [your question here]"""
 
-    response = run_agent("implementer", prompt)
+    response = run_agent("implementer", prompt, continue_session=(continue_conversations or iteration > 1))
 
     # Extract and save code blocks
     # Supports multiple formats:
@@ -259,7 +261,7 @@ QUESTION FOR HUMAN: [your question here]"""
     }
 
 
-def reviewer(code: str, task: str) -> dict:
+def reviewer(code: str, task: str, iteration: int = 1, continue_conversations: bool = False) -> dict:
     """
     Reviewer: Provides feedback to implementer AND feed-forward to tester.
     Returns structured feedback for both.
@@ -301,7 +303,7 @@ After reviewing, reflect:
 If you need clarification or are blocked, escalate to a human:
 QUESTION FOR HUMAN: [your question here]"""
 
-    response = run_agent("reviewer", prompt)
+    response = run_agent("reviewer", prompt, continue_session=(continue_conversations or iteration > 1))
 
     # Save review
     save_artifact("REVIEW.md", f"# Code Review\n\n{response}")
@@ -313,7 +315,8 @@ QUESTION FOR HUMAN: [your question here]"""
     }
 
 
-def tester(code: str, task: str, reviewer_notes: str) -> dict:
+def tester(code: str, task: str, reviewer_notes: str, iteration: int = 1,
+           continue_conversations: bool = False) -> dict:
     """
     Tester: Documents how to use the software.
     Provides usage instructions to the User agent.
@@ -364,7 +367,7 @@ After testing and documenting, reflect:
 If you need clarification or are blocked, escalate to a human:
 QUESTION FOR HUMAN: [your question here]"""
 
-    response = run_agent("tester", prompt)
+    response = run_agent("tester", prompt, continue_session=(continue_conversations or iteration > 1))
 
     # Extract and save test files
     import re
@@ -394,7 +397,8 @@ QUESTION FOR HUMAN: [your question here]"""
     }
 
 
-def user(code: str, task: str, usage_instructions: str) -> dict:
+def user(code: str, task: str, usage_instructions: str, iteration: int = 1,
+         continue_conversations: bool = False) -> dict:
     """
     User: Actually runs the code following tester's instructions.
     Provides feature requests back to Planner.
@@ -448,7 +452,7 @@ The planner will review your feature requests and decide which to implement.
 If you are stuck or need help from a human, escalate:
 QUESTION FOR HUMAN: [your question here]"""
 
-    response = run_agent("user", prompt)
+    response = run_agent("user", prompt, continue_session=(continue_conversations or iteration > 1))
 
     # Save user feedback
     save_artifact("USER_FEEDBACK.md", f"# User Feedback\n\n{response}")
@@ -475,39 +479,40 @@ def process_agent_output(agent_name: str, output: str, iteration: int) -> str:
 
 
 def run_iteration(task: str, iteration: int, user_feedback: str | None = None,
-                  shared_understanding: str | None = None) -> dict:
+                  shared_understanding: str | None = None,
+                  continue_conversations: bool = False) -> dict:
     """Run one iteration of the development loop."""
     results = {}
 
     # Stage 1: Planning
     print(f"\n[1/5] PLANNER designing solution...")
-    plan_result = planner(task, user_feedback, shared_understanding)
+    plan_result = planner(task, user_feedback, shared_understanding, iteration, continue_conversations)
     results["planner"] = process_agent_output("planner", plan_result["output"], iteration)
     print(f"\n{results['planner']}\n")
 
     # Stage 2: Implementation
     print(f"\n[2/5] IMPLEMENTER writing code...")
-    impl_result = implementer(results["planner"], task)
+    impl_result = implementer(results["planner"], task, None, iteration, continue_conversations)
     results["implementer"] = process_agent_output("implementer", impl_result["output"], iteration)
     results["files_created"] = impl_result.get("files_created", [])
     print(f"\n{results['implementer']}\n")
 
     # Stage 3: Review
     print(f"\n[3/5] REVIEWER checking implementation...")
-    review_result = reviewer(results["implementer"], task)
+    review_result = reviewer(results["implementer"], task, iteration, continue_conversations)
     results["reviewer"] = process_agent_output("reviewer", review_result["output"], iteration)
     results["approved"] = review_result["approved"]
     print(f"\n{results['reviewer']}\n")
 
     # Stage 4: Testing (with reviewer feed-forward)
     print(f"\n[4/5] TESTER creating tests and usage docs...")
-    test_result = tester(results["implementer"], task, results["reviewer"])
+    test_result = tester(results["implementer"], task, results["reviewer"], iteration, continue_conversations)
     results["tester"] = process_agent_output("tester", test_result["output"], iteration)
     print(f"\n{results['tester']}\n")
 
     # Stage 5: User feedback
     print(f"\n[5/5] USER trying the code...")
-    user_result = user(results["implementer"], task, results["tester"])
+    user_result = user(results["implementer"], task, results["tester"], iteration, continue_conversations)
     results["user"] = process_agent_output("user", user_result["output"], iteration)
     results["user_satisfied"] = user_result["satisfied"]
     print(f"\n{results['user']}\n")
@@ -705,13 +710,15 @@ def request_human_input(agent_name: str, escalation: dict, iteration: int) -> st
     return "(No response provided - agent should proceed with best judgment)"
 
 
-def run_pipeline(task: str, max_iterations: int = 3, understanding_path: str | None = None) -> dict:
+def run_pipeline(task: str, max_iterations: int = 3, understanding_path: str | None = None,
+                 continue_conversations: bool = False) -> dict:
     """Run the development loop with feedback iterations."""
 
     # Start new log session
     log_separator(f"PIPELINE: {task[:50]}")
     log(f"Task: {task}")
     log(f"Max iterations: {max_iterations}")
+    log(f"Continue conversations: {continue_conversations}")
     log(f"Understanding path: {understanding_path}")
     log(f"Log file: {LOG_FILE}")
 
@@ -750,7 +757,7 @@ def run_pipeline(task: str, max_iterations: int = 3, understanding_path: str | N
         print(f"ITERATION {iteration} of {max_iterations}")
         print("=" * 60)
 
-        results = run_iteration(task, iteration, user_feedback, shared_understanding)
+        results = run_iteration(task, iteration, user_feedback, shared_understanding, continue_conversations)
         all_results.append(results)
 
         if results["user_satisfied"]:
@@ -873,18 +880,21 @@ if __name__ == "__main__":
         print(f"\nOptions:")
         print(f"  --max-iterations N    Maximum development iterations (default: 3)")
         print(f"  --understanding PATH  Path to understanding file or directory")
+        print(f"  --continue            Continue previous agent conversations (for follow-up runs)")
         print(f"\nThe loop runs autonomously. Human reviews FINAL_REPORT.md at the end.")
         print(f"\nExamples:")
         print(f"  {sys.argv[0]} 'write a function to calculate fibonacci numbers'")
         print(f"  {sys.argv[0]} --understanding workspace/SHARED_UNDERSTANDING.md 'build the feature'")
         print(f"  {sys.argv[0]} --understanding ./context/ 'build feature'  # directory of docs")
         print(f"  {sys.argv[0]} --max-iterations 5 'complex feature'")
+        print(f"  {sys.argv[0]} --continue 'fix the bug identified in the last run'")
         sys.exit(1)
 
     # Parse args
     args = sys.argv[1:]
     max_iterations = 3
     understanding_path = None
+    continue_conversations = False
 
     if "--max-iterations" in args:
         idx = args.index("--max-iterations")
@@ -896,8 +906,13 @@ if __name__ == "__main__":
         understanding_path = args[idx + 1]
         args = args[:idx] + args[idx + 2:]
 
+    if "--continue" in args:
+        idx = args.index("--continue")
+        continue_conversations = True
+        args = args[:idx] + args[idx + 1:]
+
     task = " ".join(args)
-    result = run_pipeline(task, max_iterations, understanding_path)
+    result = run_pipeline(task, max_iterations, understanding_path, continue_conversations)
 
     print(f"\nWorkspace: {result['workspace']}")
     print(f"Run 'git log --oneline' in the workspace to see the commit history.")
