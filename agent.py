@@ -24,10 +24,21 @@ Workflow:
 
 import subprocess
 import os
+import sys
 from pathlib import Path
+from datetime import datetime
 
 AGENTS_DIR = Path(__file__).parent / "agents"
 WORKSPACE = Path(__file__).parent / "workspace"
+
+# Logging
+VERBOSE = True
+
+def log(msg: str, level: str = "INFO"):
+    """Log a message with timestamp."""
+    if VERBOSE or level in ["ERROR", "WARN"]:
+        timestamp = datetime.now().strftime("%H:%M:%S")
+        print(f"[{timestamp}] [{level}] {msg}", file=sys.stderr)
 
 # Agent permissions configuration
 AGENT_PERMISSIONS = {
@@ -82,10 +93,12 @@ def init_workspace():
     WORKSPACE.mkdir(parents=True, exist_ok=True)
     git_dir = WORKSPACE / ".git"
     if not git_dir.exists():
+        log(f"Initializing workspace git repo at {WORKSPACE}")
         git_cmd(["init"], WORKSPACE)
         (WORKSPACE / ".gitkeep").touch()
         git_cmd(["add", ".gitkeep"], WORKSPACE)
         git_cmd(["commit", "-m", "Initialize workspace"], WORKSPACE)
+        log("Workspace initialized")
 
 
 def setup_agent_branch(role: str) -> Path:
@@ -98,46 +111,60 @@ def setup_agent_branch(role: str) -> Path:
     # Create agent's subdirectory
     agent_workspace = WORKSPACE / role
     agent_workspace.mkdir(parents=True, exist_ok=True)
+    log(f"Agent workspace: {agent_workspace}")
 
     # Check if branch exists
     result = git_cmd(["branch", "--list", role], WORKSPACE)
     branch_exists = role in result.stdout
 
     if not branch_exists:
-        # Create branch from main
+        log(f"Creating new branch: {role}")
         git_cmd(["checkout", "-b", role], WORKSPACE)
     else:
-        # Checkout existing branch
+        log(f"Checking out existing branch: {role}")
         git_cmd(["checkout", role], WORKSPACE)
 
     # Merge latest from main
-    git_cmd(["merge", "main", "--no-edit"], WORKSPACE)
+    log(f"Merging latest from main into {role}")
+    result = git_cmd(["merge", "main", "--no-edit"], WORKSPACE)
+    if result.returncode != 0:
+        log(f"Merge warning: {result.stderr}", "WARN")
 
     return agent_workspace
 
 
 def commit_agent_work(role: str, message: str) -> bool:
     """Commit any changes the agent made."""
+    log(f"Checking for changes in {role}/")
+
     # Stage changes in agent's directory
     git_cmd(["add", role + "/"], WORKSPACE)
 
     # Check if there are changes to commit
     result = git_cmd(["diff", "--cached", "--quiet"], WORKSPACE)
     if result.returncode == 0:
+        log(f"No changes to commit for {role}")
         return False  # No changes
 
     # Commit
+    log(f"Committing changes for {role}: {message}")
     git_cmd(["commit", "-m", f"[{role}] {message}"], WORKSPACE)
     return True
 
 
 def merge_to_main(role: str) -> bool:
     """Merge agent's branch back to main."""
+    log(f"Merging {role} branch back to main")
+
     # Switch to main
     git_cmd(["checkout", "main"], WORKSPACE)
 
     # Merge agent's branch
     result = git_cmd(["merge", role, "--no-edit"], WORKSPACE)
+    if result.returncode == 0:
+        log(f"Successfully merged {role} to main")
+    else:
+        log(f"Merge failed: {result.stderr}", "ERROR")
     return result.returncode == 0
 
 
@@ -182,9 +209,14 @@ def run_agent(role: str, message: str, continue_session: bool = False,
     - Workspace subdirectory (workspace/{role}/) for file operations
     - Git branch for version control
     """
+    log(f"{'='*50}")
+    log(f"Starting agent: {role.upper()}")
+    log(f"{'='*50}")
+
     # Set up session directory (for conversation isolation)
     agent_session_dir = AGENTS_DIR / role
     agent_session_dir.mkdir(parents=True, exist_ok=True)
+    log(f"Session directory: {agent_session_dir}")
 
     # Set up workspace and git branch
     agent_workspace = setup_agent_branch(role)
@@ -195,9 +227,15 @@ def run_agent(role: str, message: str, continue_session: bool = False,
         "can_write": False,
         "description": "Default: read only",
     })
+    log(f"Permissions: {permissions['allowed_tools']}")
 
     # Get context from workspace
+    log(f"Gathering workspace context for {role}")
     workspace_context = get_workspace_context(role)
+    if workspace_context:
+        log(f"Found {len(workspace_context)} chars of context")
+    else:
+        log("No prior context found")
 
     # Build enhanced prompt with context
     full_prompt = message
@@ -237,6 +275,9 @@ Write any output files to this directory.
     env = os.environ.copy()
     env.pop("CLAUDECODE", None)
 
+    log(f"Running claude command for {role}")
+    log(f"Command: claude -p '<prompt>' --allowedTools {','.join(permissions.get('allowed_tools', []))}")
+
     result = subprocess.run(
         cmd,
         capture_output=True,
@@ -245,7 +286,11 @@ Write any output files to this directory.
         cwd=agent_session_dir
     )
 
+    log(f"Claude returned with code {result.returncode}")
     output = result.stdout.strip()
+
+    if result.stderr:
+        log(f"Stderr: {result.stderr[:200]}", "WARN" if result.returncode == 0 else "ERROR")
 
     # Auto-commit if agent has write permissions
     if auto_commit and permissions.get("can_write"):
@@ -254,8 +299,11 @@ Write any output files to this directory.
             output += f"\n\n[Committed changes to {role} branch]"
 
     if result.returncode != 0 and result.stderr:
+        log(f"Agent {role} failed", "ERROR")
         return f"Error: {result.stderr}\n\nOutput: {output}"
 
+    log(f"Agent {role} completed successfully")
+    log(f"Output length: {len(output)} chars")
     return output
 
 
