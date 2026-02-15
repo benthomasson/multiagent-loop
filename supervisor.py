@@ -32,9 +32,9 @@ import json
 import os
 from pathlib import Path
 from datetime import datetime
-from agent import run_agent
+from agent import run_agent, finalize_agent, WORKSPACE
 
-WORKSPACE = Path(__file__).parent / "workspace"
+# WORKSPACE is imported from agent.py
 
 def git_commit(message: str, files: list[str] | None = None) -> bool:
     """Commit changes to git with the given message."""
@@ -461,11 +461,16 @@ QUESTION FOR HUMAN: [your question here]"""
 
 
 def process_agent_output(agent_name: str, output: str, iteration: int) -> str:
-    """Process agent output, checking for escalations."""
+    """Process agent output, checking for escalations, then merge to main."""
     escalation = check_for_escalation(output)
     if escalation:
         human_response = request_human_input(agent_name, escalation, iteration)
-        return output + f"\n\n## Human Response\n\n{human_response}"
+        output += f"\n\n## Human Response\n\n{human_response}"
+
+    # Merge agent's branch back to main
+    if finalize_agent(agent_name):
+        print(f"  [Merged {agent_name} branch to main]")
+
     return output
 
 

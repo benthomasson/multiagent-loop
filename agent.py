@@ -8,12 +8,18 @@
 Agent runner utility - runs claude -p in a specific agent directory
 to maintain separate conversation contexts per agent role.
 
-Each agent has specific permissions:
-- planner: Read only (plans, doesn't write code)
-- implementer: Read + Write + Edit in workspace
-- reviewer: Read only (reviews, doesn't modify)
-- tester: Read + Write in workspace (creates tests)
-- user: Read + Bash (actually runs the code)
+Each agent has:
+- Their own session directory (agents/{role}/) for conversation isolation
+- Their own workspace subdirectory (workspace/{role}/) for file operations
+- Their own git branch for commits
+- Specific tool permissions
+
+Workflow:
+1. Agent checks out their branch, merges from main
+2. Agent reads files from workspace + gets prompt
+3. Agent does work (with tools if permitted)
+4. Agent commits to their branch
+5. Supervisor merges back to main when stage completes
 """
 
 import subprocess
@@ -27,55 +33,195 @@ WORKSPACE = Path(__file__).parent / "workspace"
 AGENT_PERMISSIONS = {
     "understand": {
         "allowed_tools": ["Read", "Glob", "Grep"],
+        "can_write": False,
         "description": "Can read files for context gathering",
     },
     "planner": {
-        "allowed_tools": ["Read", "Glob", "Grep"],
-        "description": "Can read files to understand codebase, doesn't write",
+        "allowed_tools": ["Read", "Glob", "Grep", "Write"],
+        "can_write": True,
+        "description": "Can read codebase, writes plan to their directory",
     },
     "implementer": {
         "allowed_tools": ["Read", "Write", "Edit", "Glob", "Grep"],
-        "add_dirs": [WORKSPACE],
-        "description": "Can read/write/edit files in workspace",
+        "can_write": True,
+        "description": "Can read/write/edit files in their workspace",
     },
     "reviewer": {
-        "allowed_tools": ["Read", "Glob", "Grep"],
-        "description": "Can read files for review, doesn't modify",
+        "allowed_tools": ["Read", "Glob", "Grep", "Write"],
+        "can_write": True,
+        "description": "Can read files for review, writes review to their directory",
     },
     "tester": {
         "allowed_tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
-        "add_dirs": [WORKSPACE],
+        "can_write": True,
         "description": "Can create test files and run tests",
     },
     "user": {
-        "allowed_tools": ["Read", "Glob", "Grep", "Bash"],
-        "add_dirs": [WORKSPACE],
-        "description": "Can read code and run it to test",
+        "allowed_tools": ["Read", "Glob", "Grep", "Bash", "Write"],
+        "can_write": True,
+        "description": "Can read code, run it, write feedback",
     },
 }
 
 
+def git_cmd(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
+    """Run a git command in the specified directory."""
+    env = os.environ.copy()
+    env.pop("CLAUDECODE", None)
+    return subprocess.run(
+        ["git"] + args,
+        cwd=cwd,
+        env=env,
+        capture_output=True,
+        text=True
+    )
+
+
+def init_workspace():
+    """Initialize the workspace as a git repo if needed."""
+    WORKSPACE.mkdir(parents=True, exist_ok=True)
+    git_dir = WORKSPACE / ".git"
+    if not git_dir.exists():
+        git_cmd(["init"], WORKSPACE)
+        (WORKSPACE / ".gitkeep").touch()
+        git_cmd(["add", ".gitkeep"], WORKSPACE)
+        git_cmd(["commit", "-m", "Initialize workspace"], WORKSPACE)
+
+
+def setup_agent_branch(role: str) -> Path:
+    """
+    Set up agent's workspace subdirectory and git branch.
+    Returns the agent's workspace directory.
+    """
+    init_workspace()
+
+    # Create agent's subdirectory
+    agent_workspace = WORKSPACE / role
+    agent_workspace.mkdir(parents=True, exist_ok=True)
+
+    # Check if branch exists
+    result = git_cmd(["branch", "--list", role], WORKSPACE)
+    branch_exists = role in result.stdout
+
+    if not branch_exists:
+        # Create branch from main
+        git_cmd(["checkout", "-b", role], WORKSPACE)
+    else:
+        # Checkout existing branch
+        git_cmd(["checkout", role], WORKSPACE)
+
+    # Merge latest from main
+    git_cmd(["merge", "main", "--no-edit"], WORKSPACE)
+
+    return agent_workspace
+
+
+def commit_agent_work(role: str, message: str) -> bool:
+    """Commit any changes the agent made."""
+    # Stage changes in agent's directory
+    git_cmd(["add", role + "/"], WORKSPACE)
+
+    # Check if there are changes to commit
+    result = git_cmd(["diff", "--cached", "--quiet"], WORKSPACE)
+    if result.returncode == 0:
+        return False  # No changes
+
+    # Commit
+    git_cmd(["commit", "-m", f"[{role}] {message}"], WORKSPACE)
+    return True
+
+
+def merge_to_main(role: str) -> bool:
+    """Merge agent's branch back to main."""
+    # Switch to main
+    git_cmd(["checkout", "main"], WORKSPACE)
+
+    # Merge agent's branch
+    result = git_cmd(["merge", role, "--no-edit"], WORKSPACE)
+    return result.returncode == 0
+
+
+def get_workspace_context(role: str) -> str:
+    """Read relevant files from workspace to provide context to the agent."""
+    context_parts = []
+
+    # Read shared files from main workspace
+    shared_files = ["TASK.md", "SHARED_UNDERSTANDING.md", "CUMULATIVE_UNDERSTANDING.md"]
+    for filename in shared_files:
+        filepath = WORKSPACE / filename
+        if filepath.exists():
+            content = filepath.read_text()[:3000]  # Limit size
+            context_parts.append(f"## {filename}\n\n{content}")
+
+    # Read files from other agents' directories (for context)
+    agent_order = ["planner", "implementer", "reviewer", "tester", "user"]
+    for agent in agent_order:
+        if agent == role:
+            break  # Only read from previous agents
+        agent_dir = WORKSPACE / agent
+        if agent_dir.exists():
+            for f in sorted(agent_dir.glob("*.md"))[:3]:  # Limit files
+                content = f.read_text()[:2000]
+                context_parts.append(f"## {agent}/{f.name}\n\n{content}")
+            # Also read code files from implementer
+            if agent == "implementer":
+                for f in sorted(agent_dir.glob("*.py"))[:3]:
+                    content = f.read_text()[:3000]
+                    context_parts.append(f"## {agent}/{f.name}\n\n```python\n{content}\n```")
+
+    return "\n\n---\n\n".join(context_parts) if context_parts else ""
+
+
 def run_agent(role: str, message: str, continue_session: bool = False,
-              extra_context_dirs: list[Path] | None = None) -> str:
+              auto_commit: bool = True) -> str:
     """
     Run a claude prompt as a specific agent role.
 
-    Each role has its own directory (for session isolation) and permissions.
+    Each role has:
+    - Session directory (agents/{role}/) for conversation isolation
+    - Workspace subdirectory (workspace/{role}/) for file operations
+    - Git branch for version control
     """
-    agent_dir = AGENTS_DIR / role
-    agent_dir.mkdir(parents=True, exist_ok=True)
+    # Set up session directory (for conversation isolation)
+    agent_session_dir = AGENTS_DIR / role
+    agent_session_dir.mkdir(parents=True, exist_ok=True)
 
-    # Ensure workspace exists
-    WORKSPACE.mkdir(parents=True, exist_ok=True)
+    # Set up workspace and git branch
+    agent_workspace = setup_agent_branch(role)
 
-    # Get agent permissions
+    # Get permissions
     permissions = AGENT_PERMISSIONS.get(role, {
         "allowed_tools": ["Read"],
+        "can_write": False,
         "description": "Default: read only",
     })
 
+    # Get context from workspace
+    workspace_context = get_workspace_context(role)
+
+    # Build enhanced prompt with context
+    full_prompt = message
+    if workspace_context:
+        full_prompt = f"""## WORKSPACE CONTEXT
+
+The following files are available from previous stages:
+
+{workspace_context}
+
+---
+
+## YOUR TASK
+
+{message}
+
+---
+
+Your workspace directory is: {agent_workspace}
+Write any output files to this directory.
+"""
+
     # Build command
-    cmd = ["claude", "-p", message]
+    cmd = ["claude", "-p", full_prompt]
 
     if continue_session:
         cmd.append("-c")
@@ -84,13 +230,8 @@ def run_agent(role: str, message: str, continue_session: bool = False,
     if "allowed_tools" in permissions:
         cmd.extend(["--allowedTools", ",".join(permissions["allowed_tools"])])
 
-    # Add workspace and any extra directories
-    dirs_to_add = list(permissions.get("add_dirs", []))
-    if extra_context_dirs:
-        dirs_to_add.extend(extra_context_dirs)
-
-    for d in dirs_to_add:
-        cmd.extend(["--add-dir", str(d)])
+    # Add workspace directory for file access
+    cmd.extend(["--add-dir", str(WORKSPACE)])
 
     # Remove CLAUDECODE env var to allow running from within Claude Code
     env = os.environ.copy()
@@ -101,18 +242,31 @@ def run_agent(role: str, message: str, continue_session: bool = False,
         capture_output=True,
         text=True,
         env=env,
-        cwd=agent_dir
+        cwd=agent_session_dir
     )
 
-    if result.returncode != 0 and result.stderr:
-        return f"Error: {result.stderr}\n\nOutput: {result.stdout}"
+    output = result.stdout.strip()
 
-    return result.stdout.strip()
+    # Auto-commit if agent has write permissions
+    if auto_commit and permissions.get("can_write"):
+        committed = commit_agent_work(role, f"Work from {role}")
+        if committed:
+            output += f"\n\n[Committed changes to {role} branch]"
+
+    if result.returncode != 0 and result.stderr:
+        return f"Error: {result.stderr}\n\nOutput: {output}"
+
+    return output
+
+
+def finalize_agent(role: str) -> bool:
+    """Merge agent's work back to main branch."""
+    return merge_to_main(role)
 
 
 def reset_agent(role: str) -> None:
-    """Start a fresh session for an agent by running without -c."""
-    run_agent(role, "Starting fresh session.", continue_session=False)
+    """Start a fresh session for an agent."""
+    run_agent(role, "Starting fresh session.", continue_session=False, auto_commit=False)
 
 
 def list_agents() -> list[str]:
@@ -126,12 +280,20 @@ def show_permissions():
     print("-" * 60)
     for role, perms in AGENT_PERMISSIONS.items():
         tools = ", ".join(perms.get("allowed_tools", []))
-        dirs = ", ".join(str(d) for d in perms.get("add_dirs", []))
+        can_write = "Yes" if perms.get("can_write") else "No"
         print(f"\n{role}:")
         print(f"  Tools: {tools}")
-        if dirs:
-            print(f"  Dirs: {dirs}")
+        print(f"  Can Write: {can_write}")
+        print(f"  Workspace: workspace/{role}/")
         print(f"  {perms.get('description', '')}")
+
+
+def show_branches():
+    """Show git branches in workspace."""
+    init_workspace()
+    result = git_cmd(["branch", "-v"], WORKSPACE)
+    print("Workspace branches:")
+    print(result.stdout)
 
 
 if __name__ == "__main__":
@@ -141,11 +303,16 @@ if __name__ == "__main__":
         print(f"Usage: {sys.argv[0]} <role> <message>")
         print(f"       {sys.argv[0]} <role> -c <message>  (continue session)")
         print(f"       {sys.argv[0]} --permissions  (show agent permissions)")
+        print(f"       {sys.argv[0]} --branches     (show workspace branches)")
         print(f"\nAvailable roles: {', '.join(list_agents())}")
         sys.exit(1)
 
     if sys.argv[1] == "--permissions":
         show_permissions()
+        sys.exit(0)
+
+    if sys.argv[1] == "--branches":
+        show_branches()
         sys.exit(0)
 
     role = sys.argv[1]
