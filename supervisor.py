@@ -437,21 +437,115 @@ def run_iteration(task: str, iteration: int, user_feedback: str | None = None,
     results["user_satisfied"] = user_result["satisfied"]
     print(f"\n{results['user']}\n")
 
-    # Create iteration summary commit
-    summary = f"""Iteration {iteration} complete
+    # Create iteration understanding document - what we learned this iteration
+    iteration_understanding = f"""# Iteration {iteration} Understanding
 
-Planner confidence: {plan_result.get('confidence', 'N/A')}
+## What We Learned
+
+### From Planner
+{plan_result.get('output', '')[-2000:] if plan_result.get('output') else 'N/A'}
+
+### From Implementer
 Files created: {', '.join(results.get('files_created', [])) or 'None'}
-Reviewer verdict: {'APPROVED' if results['approved'] else 'NEEDS_CHANGES'}
-User verdict: {'SATISFIED' if results['user_satisfied'] else 'NEEDS_IMPROVEMENT'}
+
+### From Reviewer
+Verdict: {'APPROVED' if results['approved'] else 'NEEDS_CHANGES'}
+
+{results.get('reviewer', '')[-1500:]}
+
+### From Tester
+{results.get('tester', '')[-1500:]}
+
+### From User
+Verdict: {'SATISFIED' if results['user_satisfied'] else 'NEEDS_IMPROVEMENT'}
+
+{results.get('user', '')[-1500:]}
+
+## Summary
+
+- Planner confidence: {plan_result.get('confidence', 'N/A')}
+- Reviewer verdict: {'APPROVED' if results['approved'] else 'NEEDS_CHANGES'}
+- User verdict: {'SATISFIED' if results['user_satisfied'] else 'NEEDS_IMPROVEMENT'}
 """
-    save_artifact(f"ITERATION_{iteration}_SUMMARY.md", summary)
-    git_commit(f"[supervisor] Iteration {iteration} complete")
+    save_artifact(f"ITERATION_{iteration}_UNDERSTANDING.md", iteration_understanding)
+
+    # Create human-readable summary for review
+    human_summary = f"""# Iteration {iteration} Summary - For Human Review
+
+## Status
+- **Reviewer**: {'✓ APPROVED' if results['approved'] else '✗ NEEDS_CHANGES'}
+- **User**: {'✓ SATISFIED' if results['user_satisfied'] else '✗ NEEDS_IMPROVEMENT'}
+
+## Files Created
+{chr(10).join('- ' + f for f in results.get('files_created', [])) or '- None'}
+
+## Key Decisions Made
+(Extracted from agent outputs - review for accuracy)
+
+## User Feedback & Feature Requests
+{results.get('user', '')[-1000:]}
+
+## Questions for Human Review
+1. Does the implementation match your expectations?
+2. Are there any constraints or context the agents missed?
+3. Should any feature requests be prioritized differently?
+
+## Next Steps
+{'Development complete - ready for final review.' if results['user_satisfied'] else 'Another iteration needed - review feedback above.'}
+
+---
+*Add your comments below. They will be incorporated into the next iteration.*
+
+## Human Comments
+
+
+"""
+    summary_path = save_artifact(f"ITERATION_{iteration}_HUMAN_REVIEW.md", human_summary)
+    git_commit(f"[supervisor] Iteration {iteration} complete - ready for human review")
+
+    print(f"\n{'='*60}")
+    print(f"ITERATION {iteration} COMPLETE - HUMAN REVIEW REQUESTED")
+    print(f"{'='*60}")
+    print(f"\nReview: {summary_path}")
+    print("Add comments to the 'Human Comments' section if needed.")
 
     return results
 
 
-def run_pipeline(task: str, max_iterations: int = 3, understanding_file: str | None = None) -> dict:
+def load_understanding(understanding_path: str | Path) -> str:
+    """Load shared understanding from a file or directory of files."""
+    path = Path(understanding_path)
+
+    if path.is_file():
+        return path.read_text()
+
+    if path.is_dir():
+        # Synthesize from multiple documents
+        docs = []
+        for f in sorted(path.glob("*.md")):
+            docs.append(f"## {f.name}\n\n{f.read_text()[:3000]}")
+        return "\n\n---\n\n".join(docs)
+
+    return ""
+
+
+def check_human_comments(iteration: int) -> str | None:
+    """Check if human added comments to the review document."""
+    review_path = WORKSPACE / f"ITERATION_{iteration}_HUMAN_REVIEW.md"
+    if not review_path.exists():
+        return None
+
+    content = review_path.read_text()
+    # Look for content after "## Human Comments"
+    if "## Human Comments" in content:
+        comments_section = content.split("## Human Comments")[-1].strip()
+        if comments_section and len(comments_section) > 10:
+            return comments_section
+    return None
+
+
+def run_pipeline(task: str, max_iterations: int = 3, understanding_path: str | None = None,
+                 interactive: bool = True) -> dict:
     """Run the development loop with feedback iterations."""
 
     # Initialize workspace with git
@@ -459,13 +553,15 @@ def run_pipeline(task: str, max_iterations: int = 3, understanding_file: str | N
 
     # Load shared understanding if provided
     shared_understanding = None
-    if understanding_file:
-        understanding_path = Path(understanding_file)
-        if understanding_path.exists():
-            shared_understanding = understanding_path.read_text()
-            print(f"Loaded shared understanding from: {understanding_file}")
+    if understanding_path:
+        shared_understanding = load_understanding(understanding_path)
+        if shared_understanding:
+            print(f"Loaded shared understanding from: {understanding_path}")
+            # Save to workspace for reference
+            save_artifact("SHARED_UNDERSTANDING.md", shared_understanding)
+            git_commit("[supervisor] Import shared understanding")
         else:
-            print(f"Warning: Understanding file not found: {understanding_file}")
+            print(f"Warning: No understanding found at: {understanding_path}")
 
     print("=" * 60)
     print("SUPERVISOR: Starting development loop")
@@ -498,9 +594,32 @@ def run_pipeline(task: str, max_iterations: int = 3, understanding_file: str | N
 
         if i < max_iterations - 1:
             print("\n" + "-" * 60)
-            print("SUPERVISOR: User requested improvements - starting next iteration")
+            print("SUPERVISOR: User requested improvements")
             print("-" * 60)
+
+            # Check for human comments if interactive
+            human_comments = None
+            if interactive:
+                print("\nHuman review opportunity:")
+                print(f"  Edit: workspace/ITERATION_{iteration}_HUMAN_REVIEW.md")
+                print("  Add comments in the 'Human Comments' section.")
+                print("\nPress Enter to continue (or wait for edits)...")
+                try:
+                    input()
+                except EOFError:
+                    pass
+                human_comments = check_human_comments(iteration)
+                if human_comments:
+                    print(f"\nIncorporating human comments into next iteration.")
+                    git_commit(f"[human] Comments on iteration {iteration}")
+
+            # Combine user feedback with human comments
             user_feedback = results["user"]
+            if human_comments:
+                user_feedback += f"\n\n## Human Comments\n\n{human_comments}"
+
+            print("\nStarting next iteration...")
+            print("-" * 60)
     else:
         print("\n" + "=" * 60)
         print("SUPERVISOR: Max iterations reached")
@@ -540,16 +659,19 @@ if __name__ == "__main__":
         print(f"Usage: {sys.argv[0]} <task description> [options]")
         print(f"\nOptions:")
         print(f"  --max-iterations N    Maximum development iterations (default: 3)")
-        print(f"  --understanding FILE  Path to shared understanding document")
+        print(f"  --understanding PATH  Path to understanding file or directory")
+        print(f"  --no-interactive      Skip human review pauses between iterations")
         print(f"\nExamples:")
         print(f"  {sys.argv[0]} 'write a function to calculate fibonacci numbers'")
         print(f"  {sys.argv[0]} --understanding workspace/SHARED_UNDERSTANDING.md 'build the feature'")
+        print(f"  {sys.argv[0]} --understanding ./context/ 'build feature'  # directory of docs")
         sys.exit(1)
 
     # Parse args
     args = sys.argv[1:]
     max_iterations = 3
-    understanding_file = None
+    understanding_path = None
+    interactive = True
 
     if "--max-iterations" in args:
         idx = args.index("--max-iterations")
@@ -558,11 +680,16 @@ if __name__ == "__main__":
 
     if "--understanding" in args:
         idx = args.index("--understanding")
-        understanding_file = args[idx + 1]
+        understanding_path = args[idx + 1]
         args = args[:idx] + args[idx + 2:]
 
+    if "--no-interactive" in args:
+        idx = args.index("--no-interactive")
+        interactive = False
+        args = args[:idx] + args[idx + 1:]
+
     task = " ".join(args)
-    result = run_pipeline(task, max_iterations, understanding_file)
+    result = run_pipeline(task, max_iterations, understanding_path, interactive)
 
     print(f"\nWorkspace: {result['workspace']}")
     print(f"Run 'git log --oneline' in the workspace to see the commit history.")

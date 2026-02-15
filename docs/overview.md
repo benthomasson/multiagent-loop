@@ -119,7 +119,20 @@ uv run understand.py "build a REST API for user management"
 
 # Phase 1+: Run development loop
 uv run supervisor.py --understanding workspace/SHARED_UNDERSTANDING.md "build the API"
+
+# With a directory of context documents
+uv run supervisor.py --understanding ./context/ "build the feature"
 ```
+
+## Human Review Checkpoints
+
+After each iteration, the supervisor:
+1. Creates `ITERATION_N_UNDERSTANDING.md` - what agents learned
+2. Creates `ITERATION_N_HUMAN_REVIEW.md` - summary for human review
+3. Pauses for human to add comments
+4. Incorporates comments into next iteration
+
+This keeps humans in the loop while AI does the heavy lifting.
 
 ## Why This Approach
 
