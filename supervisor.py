@@ -144,7 +144,10 @@ After writing your plan, reflect:
 3. What would make your job easier next time?
 4. Rate your confidence in this plan (HIGH/MEDIUM/LOW) and explain why.
 
-Be concise and actionable. The implementer may push back on the HOW."""
+Be concise and actionable. The implementer may push back on the HOW.
+
+If you need clarification or are stuck, you can escalate to a human:
+QUESTION FOR HUMAN: [your question here]"""
 
     response = run_agent("planner", prompt)
 
@@ -198,7 +201,10 @@ After implementing, reflect:
 3. What would make your job easier next time?
 4. Any concerns about this implementation the reviewer should focus on?
 
-Provide the implementation code in fenced code blocks with filenames."""
+Provide the implementation code in fenced code blocks with filenames.
+
+If you need clarification or are stuck, escalate to a human:
+QUESTION FOR HUMAN: [your question here]"""
 
     response = run_agent("implementer", prompt)
 
@@ -264,7 +270,10 @@ After reviewing, reflect:
 1. What aspects of this code were easy to review? Why?
 2. What made review difficult? (unclear code, missing docs, etc.)
 3. What would make your job easier next time?
-4. What should the implementer know that would help future reviews?"""
+4. What should the implementer know that would help future reviews?
+
+If you need clarification or are blocked, escalate to a human:
+QUESTION FOR HUMAN: [your question here]"""
 
     response = run_agent("reviewer", prompt)
 
@@ -320,7 +329,10 @@ After testing and documenting, reflect:
 1. What was easy to test? What was hard?
 2. What information was missing that would have helped?
 3. What would make your job easier next time?
-4. Any gaps in the implementation that testing revealed?"""
+4. Any gaps in the implementation that testing revealed?
+
+If you need clarification or are blocked, escalate to a human:
+QUESTION FOR HUMAN: [your question here]"""
 
     response = run_agent("tester", prompt)
 
@@ -385,7 +397,10 @@ Prioritize your requests: P0 (critical), P1 (important), P2 (nice to have)
 
 Explain your verdict.
 
-The planner will review your feature requests and decide which to implement."""
+The planner will review your feature requests and decide which to implement.
+
+If you are stuck or need help from a human, escalate:
+QUESTION FOR HUMAN: [your question here]"""
 
     response = run_agent("user", prompt)
 
@@ -399,6 +414,15 @@ The planner will review your feature requests and decide which to implement."""
     }
 
 
+def process_agent_output(agent_name: str, output: str, iteration: int) -> str:
+    """Process agent output, checking for escalations."""
+    escalation = check_for_escalation(output)
+    if escalation:
+        human_response = request_human_input(agent_name, escalation, iteration)
+        return output + f"\n\n## Human Response\n\n{human_response}"
+    return output
+
+
 def run_iteration(task: str, iteration: int, user_feedback: str | None = None,
                   shared_understanding: str | None = None) -> dict:
     """Run one iteration of the development loop."""
@@ -407,33 +431,33 @@ def run_iteration(task: str, iteration: int, user_feedback: str | None = None,
     # Stage 1: Planning
     print(f"\n[1/5] PLANNER designing solution...")
     plan_result = planner(task, user_feedback, shared_understanding)
-    results["planner"] = plan_result["output"]
+    results["planner"] = process_agent_output("planner", plan_result["output"], iteration)
     print(f"\n{results['planner']}\n")
 
     # Stage 2: Implementation
     print(f"\n[2/5] IMPLEMENTER writing code...")
     impl_result = implementer(results["planner"], task)
-    results["implementer"] = impl_result["output"]
+    results["implementer"] = process_agent_output("implementer", impl_result["output"], iteration)
     results["files_created"] = impl_result.get("files_created", [])
     print(f"\n{results['implementer']}\n")
 
     # Stage 3: Review
     print(f"\n[3/5] REVIEWER checking implementation...")
     review_result = reviewer(results["implementer"], task)
-    results["reviewer"] = review_result["output"]
+    results["reviewer"] = process_agent_output("reviewer", review_result["output"], iteration)
     results["approved"] = review_result["approved"]
     print(f"\n{results['reviewer']}\n")
 
     # Stage 4: Testing (with reviewer feed-forward)
     print(f"\n[4/5] TESTER creating tests and usage docs...")
     test_result = tester(results["implementer"], task, results["reviewer"])
-    results["tester"] = test_result["output"]
+    results["tester"] = process_agent_output("tester", test_result["output"], iteration)
     print(f"\n{results['tester']}\n")
 
     # Stage 5: User feedback
     print(f"\n[5/5] USER trying the code...")
     user_result = user(results["implementer"], task, results["tester"])
-    results["user"] = user_result["output"]
+    results["user"] = process_agent_output("user", user_result["output"], iteration)
     results["user_satisfied"] = user_result["satisfied"]
     print(f"\n{results['user']}\n")
 
@@ -542,6 +566,92 @@ def check_human_comments(iteration: int) -> str | None:
         if comments_section and len(comments_section) > 10:
             return comments_section
     return None
+
+
+def check_for_escalation(agent_output: str) -> dict | None:
+    """Check if an agent is requesting human help."""
+    escalation_markers = [
+        "ESCALATE:",
+        "QUESTION FOR HUMAN:",
+        "NEED CLARIFICATION:",
+        "STUCK:",
+        "BLOCKED:",
+    ]
+
+    for marker in escalation_markers:
+        if marker in agent_output.upper():
+            # Extract the escalation content
+            lines = agent_output.split('\n')
+            escalation_lines = []
+            capturing = False
+            for line in lines:
+                if any(m in line.upper() for m in escalation_markers):
+                    capturing = True
+                if capturing:
+                    escalation_lines.append(line)
+                    if line.strip() == "" and len(escalation_lines) > 1:
+                        break
+            return {
+                "needs_human": True,
+                "message": '\n'.join(escalation_lines)
+            }
+    return None
+
+
+def request_human_input(agent_name: str, escalation: dict, iteration: int) -> str:
+    """Request input from human when agent escalates."""
+    print(f"\n{'='*60}")
+    print(f"ESCALATION from {agent_name.upper()}")
+    print("="*60)
+    print(f"\n{escalation['message']}\n")
+
+    # Save escalation to file
+    escalation_path = WORKSPACE / f"ESCALATION_{iteration}_{agent_name}.md"
+    escalation_content = f"""# Escalation from {agent_name}
+
+## Agent's Question/Issue
+
+{escalation['message']}
+
+## Human Response
+
+(Enter your response below)
+
+"""
+    escalation_path.write_text(escalation_content)
+
+    print(f"Respond in: {escalation_path}")
+    print("Or type your response below (blank line to finish):")
+    print("-" * 60)
+
+    lines = []
+    while True:
+        try:
+            line = input()
+            if line == "" and lines:
+                break
+            lines.append(line)
+        except EOFError:
+            break
+
+    response = '\n'.join(lines)
+
+    if response.strip():
+        # Update file with response
+        escalation_content += response
+        escalation_path.write_text(escalation_content)
+        git_commit(f"[human] Response to {agent_name} escalation")
+        return response
+
+    # Check if they edited the file instead
+    content = escalation_path.read_text()
+    if "## Human Response" in content:
+        response = content.split("## Human Response")[-1].strip()
+        if response:
+            git_commit(f"[human] Response to {agent_name} escalation")
+            return response
+
+    return "(No response provided - agent should proceed with best judgment)"
 
 
 def run_pipeline(task: str, max_iterations: int = 3, understanding_path: str | None = None) -> dict:
