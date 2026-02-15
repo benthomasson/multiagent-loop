@@ -124,15 +124,31 @@ uv run supervisor.py --understanding workspace/SHARED_UNDERSTANDING.md "build th
 uv run supervisor.py --understanding ./context/ "build the feature"
 ```
 
-## Human Review Checkpoints
+## Autonomous Operation
 
-After each iteration, the supervisor:
-1. Creates `ITERATION_N_UNDERSTANDING.md` - what agents learned
-2. Creates `ITERATION_N_HUMAN_REVIEW.md` - summary for human review
-3. Pauses for human to add comments
-4. Incorporates comments into next iteration
+The loop runs autonomously without human intervention:
 
-This keeps humans in the loop while AI does the heavy lifting.
+1. Human provides task + understanding documents
+2. Loop runs through all iterations (or until User is SATISFIED)
+3. Each iteration builds on previous learnings
+4. Human reviews `FINAL_REPORT.md` at the end
+
+**No context switching for humans.** The system makes progress while you do other work.
+
+### Artifacts for Async Review
+
+- `ITERATION_N_UNDERSTANDING.md` - What agents learned each iteration
+- `CUMULATIVE_UNDERSTANDING.md` - All learnings combined
+- `FINAL_REPORT.md` - Complete summary for human review
+- `git log` - Full audit trail of all decisions
+
+### Continuing After Review
+
+If more work is needed after reviewing the final report:
+```bash
+# Continue with existing understanding
+uv run supervisor.py --understanding workspace/ "refine the implementation"
+```
 
 ## Why This Approach
 
