@@ -4,9 +4,54 @@ A multi-agent automated software development workflow using Claude CLI.
 
 ## Philosophy: Claude Is Your User
 
-The key insight: the **User** agent isn't simulating user stories—it actually runs the code, hits errors, and provides real UX feedback. At the end of each stage, every agent asks: **"What would make my job easier?"**
+### The Key Insight
+
+The **User** agent isn't simulating user stories—it actually runs the code, hits errors, and provides real UX feedback. This isn't role-playing. Claude is the intended consumer of the software being built.
+
+Traditional software development tries to imagine what users want:
+- Write requirements based on assumptions
+- Build features speculatively
+- Gather feedback after deployment
+- Iterate based on second-hand reports
+
+But here, the user is *in the loop*. We don't have to imagine what Claude wants—we can just ask. When the User agent says "this error message is confusing" or "I wish I could pass a list instead of a single value," that's genuine feedback from the entity that will actually use the code.
+
+### Real Feedback, Not Simulated
+
+When the User agent runs `python is_prime.py` and hits an `EOFError`, that's not a test case someone wrote. Claude actually tried to use the software and failed. When it reports "the demo crashed in non-interactive mode," that's real UX feedback from real usage.
+
+This changes the nature of the feedback loop:
+
+| Traditional | AI-First |
+|-------------|----------|
+| Hypothetical users | Actual user in the loop |
+| Delayed feedback | Real-time feedback |
+| Interpreted requirements | Direct requirements |
+| "Users might want..." | "I want..." |
+
+### The Self-Review Question
+
+At the end of each stage, every agent asks: **"What would make my job easier?"**
+
+This surfaces friction immediately:
+- **Planner**: "The task description was ambiguous about error handling"
+- **Implementer**: "The plan didn't specify the expected input format"
+- **Reviewer**: "No type hints made the code harder to review"
+- **Tester**: "Missing edge case documentation"
+- **User**: "The error message didn't tell me what to do next"
 
 Those feature requests go back to the Planner, who decides which are worth implementing. The loop continues until the User is satisfied.
+
+### Why This Works
+
+Claude is particularly well-suited as a user because:
+
+1. **It can articulate frustration** - Unlike real users who abandon software silently, Claude explains exactly what went wrong and why
+2. **It follows instructions literally** - If documentation is unclear, Claude will fail in instructive ways
+3. **It provides structured feedback** - Prioritized feature requests, not vague complaints
+4. **It's always available** - No user research scheduling, no interview bias
+
+The result is software designed for how Claude actually works, with error messages Claude can understand and APIs Claude can use effectively.
 
 ## Phase 0: Shared Understanding
 
@@ -147,6 +192,12 @@ uv run supervisor.py "write a function to calculate fibonacci numbers"
 
 # With iteration limit
 uv run supervisor.py "build a CLI calculator" --max-iterations 5
+
+# Continue a previous run (agents remember their prior work)
+uv run supervisor.py --continue "fix the bug identified in the last run"
+
+# Combine options
+uv run supervisor.py --continue --understanding workspace/ --max-iterations 2 "add input validation"
 ```
 
 ### View the git history
@@ -169,6 +220,22 @@ uv run agent.py user "try running this code and report issues"
 uv run agent.py planner -c "what about error handling?"
 ```
 
+### Monitor and control agents
+
+```bash
+# Check which agents are running
+uv run agent.py --status
+
+# Kill a hung agent
+uv run agent.py --kill tester
+
+# Force kill (SIGKILL)
+uv run agent.py --kill tester -9
+
+# Kill all agents
+uv run agent.py --kill-all
+```
+
 ## Directory Structure
 
 ```
@@ -183,6 +250,8 @@ multiagent-loop/
 │   ├── reviewer/
 │   ├── tester/
 │   └── user/
+├── pids/              # PID files for running agents
+│   └── {role}.pid     # Contains PID of running agent process
 └── workspace/         # Output directory (git repo with artifacts)
     ├── .git/          # Full commit history
     ├── TASK.md        # Original task
