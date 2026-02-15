@@ -8,6 +8,29 @@ The key insight: the **User** agent isn't simulating user stories—it actually 
 
 Those feature requests go back to the Planner, who decides which are worth implementing. The loop continues until the User is satisfied.
 
+## Phase 0: Shared Understanding
+
+**Before development begins**, humans and AI build shared understanding together.
+
+This isn't just writing a spec—it's collaborative intelligence:
+- AI analyzes the task and identifies gaps
+- AI asks clarifying questions
+- Human provides answers
+- AI validates understanding and checks for contradictions
+- Both parties build genuine understanding
+
+```bash
+# Interactive shared understanding session
+uv run understand.py "build a REST API for user management"
+
+# With context from external sources
+uv run understand.py "fix the login bug" --context JIRA-123.md slack-thread.txt
+```
+
+This creates `SHARED_UNDERSTANDING.md` which all agents reference.
+
+See: [shared-understanding framework](https://github.com/benthomasson/shared-understanding)
+
 ## Key Features
 
 ### Git Coordination
@@ -103,10 +126,23 @@ This surfaces friction points and improvement ideas throughout the pipeline, not
 
 ## Usage
 
-### Run the full pipeline
+### Full Workflow (Recommended)
 
 ```bash
 cd ~/git/multiagent-loop
+
+# Phase 0: Build shared understanding (interactive)
+uv run understand.py "build a REST API for user management"
+# Answer the clarifying questions...
+
+# Phase 1+: Run development loop with understanding
+uv run supervisor.py --understanding workspace/SHARED_UNDERSTANDING.md "build a REST API for user management"
+```
+
+### Quick Start (Skip Phase 0)
+
+```bash
+# Run development loop directly (planner works from task alone)
 uv run supervisor.py "write a function to calculate fibonacci numbers"
 
 # With iteration limit
@@ -137,9 +173,11 @@ uv run agent.py planner -c "what about error handling?"
 
 ```
 multiagent-loop/
-├── agent.py           # Agent runner utility
+├── understand.py      # Phase 0: Shared understanding builder
 ├── supervisor.py      # Pipeline orchestrator with feedback loop
+├── agent.py           # Agent runner utility
 ├── agents/            # Agent directories (session isolation)
+│   ├── understand/    # Phase 0 context
 │   ├── planner/
 │   ├── implementer/
 │   ├── reviewer/
@@ -174,6 +212,9 @@ multiagent-loop/
 
 | File | Created By | Purpose |
 |------|------------|---------|
+| `INITIAL_ANALYSIS.md` | Understand | Initial task analysis and questions |
+| `VALIDATION.md` | Understand | Human answers and validation |
+| `SHARED_UNDERSTANDING.md` | Understand | Final shared understanding document |
 | `TASK.md` | Supervisor | Original task description |
 | `PLAN.md` | Planner | Requirements, design decisions, success criteria |
 | `IMPLEMENTATION.md` | Implementer | Implementation notes and self-review |

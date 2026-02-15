@@ -90,7 +90,7 @@ def save_artifact(name: str, content: str) -> Path:
     path.write_text(content)
     return path
 
-def planner(task: str, user_feedback: str | None = None) -> dict:
+def planner(task: str, user_feedback: str | None = None, shared_understanding: str | None = None) -> dict:
     """
     Planner: Product Manager + Architect
     Decides WHAT and WHY, suggests HOW.
@@ -107,10 +107,23 @@ Consider this feedback. Decide which feature requests are worth implementing.
 Explain which you'll address and which you won't (and why).
 """
 
+    understanding_section = ""
+    if shared_understanding:
+        understanding_section = f"""
+SHARED UNDERSTANDING (Phase 0):
+This document was collaboratively created by humans and AI to build shared
+understanding before development began. Use it as your foundation.
+
+{shared_understanding}
+
+---
+
+"""
+
     prompt = f"""You are a software planner (product manager + architect).
 You decide WHAT to build and WHY. You suggest HOW, but the implementer
 has final say on implementation approach.
-
+{understanding_section}
 TASK: {task}
 {feedback_section}
 Provide your response in TWO parts:
@@ -386,13 +399,14 @@ The planner will review your feature requests and decide which to implement."""
     }
 
 
-def run_iteration(task: str, iteration: int, user_feedback: str | None = None) -> dict:
+def run_iteration(task: str, iteration: int, user_feedback: str | None = None,
+                  shared_understanding: str | None = None) -> dict:
     """Run one iteration of the development loop."""
     results = {}
 
     # Stage 1: Planning
     print(f"\n[1/5] PLANNER designing solution...")
-    plan_result = planner(task, user_feedback)
+    plan_result = planner(task, user_feedback, shared_understanding)
     results["planner"] = plan_result["output"]
     print(f"\n{results['planner']}\n")
 
@@ -437,11 +451,21 @@ User verdict: {'SATISFIED' if results['user_satisfied'] else 'NEEDS_IMPROVEMENT'
     return results
 
 
-def run_pipeline(task: str, max_iterations: int = 3) -> dict:
+def run_pipeline(task: str, max_iterations: int = 3, understanding_file: str | None = None) -> dict:
     """Run the development loop with feedback iterations."""
 
     # Initialize workspace with git
     init_workspace()
+
+    # Load shared understanding if provided
+    shared_understanding = None
+    if understanding_file:
+        understanding_path = Path(understanding_file)
+        if understanding_path.exists():
+            shared_understanding = understanding_path.read_text()
+            print(f"Loaded shared understanding from: {understanding_file}")
+        else:
+            print(f"Warning: Understanding file not found: {understanding_file}")
 
     print("=" * 60)
     print("SUPERVISOR: Starting development loop")
@@ -463,7 +487,7 @@ def run_pipeline(task: str, max_iterations: int = 3) -> dict:
         print(f"ITERATION {iteration} of {max_iterations}")
         print("=" * 60)
 
-        results = run_iteration(task, iteration, user_feedback)
+        results = run_iteration(task, iteration, user_feedback, shared_understanding)
         all_results.append(results)
 
         if results["user_satisfied"]:
@@ -513,20 +537,32 @@ Completed: {datetime.now().isoformat()}
 
 if __name__ == "__main__":
     if len(sys.argv) < 2:
-        print(f"Usage: {sys.argv[0]} <task description> [--max-iterations N]")
-        print(f"\nExample: {sys.argv[0]} 'write a function to calculate fibonacci numbers'")
+        print(f"Usage: {sys.argv[0]} <task description> [options]")
+        print(f"\nOptions:")
+        print(f"  --max-iterations N    Maximum development iterations (default: 3)")
+        print(f"  --understanding FILE  Path to shared understanding document")
+        print(f"\nExamples:")
+        print(f"  {sys.argv[0]} 'write a function to calculate fibonacci numbers'")
+        print(f"  {sys.argv[0]} --understanding workspace/SHARED_UNDERSTANDING.md 'build the feature'")
         sys.exit(1)
 
     # Parse args
     args = sys.argv[1:]
     max_iterations = 3
+    understanding_file = None
+
     if "--max-iterations" in args:
         idx = args.index("--max-iterations")
         max_iterations = int(args[idx + 1])
         args = args[:idx] + args[idx + 2:]
 
+    if "--understanding" in args:
+        idx = args.index("--understanding")
+        understanding_file = args[idx + 1]
+        args = args[:idx] + args[idx + 2:]
+
     task = " ".join(args)
-    result = run_pipeline(task, max_iterations)
+    result = run_pipeline(task, max_iterations, understanding_file)
 
     print(f"\nWorkspace: {result['workspace']}")
     print(f"Run 'git log --oneline' in the workspace to see the commit history.")
