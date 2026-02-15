@@ -1,7 +1,10 @@
-workspace/
-workspace*
+# Agent runtime directories
+/workspace/
+/agents/
+
+# Python
 __pycache__/
 *.pyc
+
+# Logs
 *.log
-multiagent.log
-agents/
