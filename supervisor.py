@@ -32,7 +32,7 @@ import json
 import os
 from pathlib import Path
 from datetime import datetime
-from agent import run_agent, finalize_agent, WORKSPACE
+from agent import run_agent, finalize_agent, WORKSPACE, log, log_separator, LOG_FILE
 
 # WORKSPACE is imported from agent.py
 
@@ -707,6 +707,13 @@ def request_human_input(agent_name: str, escalation: dict, iteration: int) -> st
 
 def run_pipeline(task: str, max_iterations: int = 3, understanding_path: str | None = None) -> dict:
     """Run the development loop with feedback iterations."""
+
+    # Start new log session
+    log_separator(f"PIPELINE: {task[:50]}")
+    log(f"Task: {task}")
+    log(f"Max iterations: {max_iterations}")
+    log(f"Understanding path: {understanding_path}")
+    log(f"Log file: {LOG_FILE}")
 
     # Initialize workspace with git
     init_workspace()

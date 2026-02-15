@@ -30,15 +30,32 @@ from datetime import datetime
 
 AGENTS_DIR = Path(__file__).parent / "agents"
 WORKSPACE = Path(__file__).parent / "workspace"
+LOG_FILE = Path(__file__).parent / "multiagent.log"
 
 # Logging
 VERBOSE = True
+_log_file_handle = None
+
+def _get_log_file():
+    """Get or create log file handle."""
+    global _log_file_handle
+    if _log_file_handle is None:
+        _log_file_handle = open(LOG_FILE, "a")
+    return _log_file_handle
 
 def log(msg: str, level: str = "INFO"):
-    """Log a message with timestamp."""
+    """Log a message with timestamp to stderr and file."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    log_line = f"[{timestamp}] [{level}] {msg}"
+
+    # Always write to file
+    f = _get_log_file()
+    f.write(log_line + "\n")
+    f.flush()
+
+    # Print to stderr if verbose or error/warn
     if VERBOSE or level in ["ERROR", "WARN"]:
-        timestamp = datetime.now().strftime("%H:%M:%S")
-        print(f"[{timestamp}] [{level}] {msg}", file=sys.stderr)
+        print(log_line, file=sys.stderr)
 
 # Agent permissions configuration
 AGENT_PERMISSIONS = {
@@ -86,6 +103,15 @@ def git_cmd(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
         capture_output=True,
         text=True
     )
+
+
+def log_separator(title: str = "NEW RUN"):
+    """Add a visible separator in the log file."""
+    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
+    separator = f"\n{'='*60}\n{title} - {timestamp}\n{'='*60}\n"
+    f = _get_log_file()
+    f.write(separator)
+    f.flush()
 
 
 def init_workspace():
