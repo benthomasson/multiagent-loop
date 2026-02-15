@@ -209,15 +209,38 @@ QUESTION FOR HUMAN: [your question here]"""
     response = run_agent("implementer", prompt)
 
     # Extract and save code blocks
+    # Supports multiple formats:
+    #   ```python filename.py
+    #   **File: `filename.py`** followed by ```python
+    #   # filename.py at start of code block
     import re
-    code_blocks = re.findall(r'```(\w+)?\s*(?:#\s*)?(\S+\.(?:py|js|ts|sh|yaml|yml|json|md))\n(.*?)```',
-                             response, re.DOTALL)
+
     files_created = []
-    for lang, filename, code in code_blocks:
-        # Clean filename
-        filename = filename.strip()
-        save_artifact(filename, code.strip())
-        files_created.append(filename)
+
+    # Pattern 1: ```python filename.py\ncode```
+    pattern1 = re.findall(r'```(\w+)?\s+(\S+\.(?:py|js|ts|sh|yaml|yml|json))\n(.*?)```',
+                          response, re.DOTALL)
+    for lang, filename, code in pattern1:
+        save_artifact(filename.strip(), code.strip())
+        files_created.append(filename.strip())
+
+    # Pattern 2: **File: `filename.py`** followed by ```\ncode```
+    pattern2 = re.findall(r'\*\*File:\s*`(\S+\.(?:py|js|ts|sh|yaml|yml|json))`\*\*\s*\n+```\w*\n(.*?)```',
+                          response, re.DOTALL)
+    for filename, code in pattern2:
+        if filename not in files_created:
+            save_artifact(filename.strip(), code.strip())
+            files_created.append(filename.strip())
+
+    # Pattern 3: # filename.py as first line in code block
+    pattern3 = re.findall(r'```\w*\n#\s*(\S+\.(?:py|js|ts|sh|yaml|yml|json))\n(.*?)```',
+                          response, re.DOTALL)
+    for filename, code in pattern3:
+        if filename not in files_created:
+            save_artifact(filename.strip(), code.strip())
+            files_created.append(filename.strip())
+
+    # files_created is already populated above
 
     # Also save the full response
     save_artifact("IMPLEMENTATION.md", f"# Implementation\n\n{response}")
@@ -338,9 +361,21 @@ QUESTION FOR HUMAN: [your question here]"""
 
     # Extract and save test files
     import re
-    test_blocks = re.findall(r'```(?:python)?\s*(test_\S+\.py)\n(.*?)```', response, re.DOTALL)
-    for filename, code in test_blocks:
+    # Extract test files - support multiple formats
+    test_files = []
+
+    # Pattern 1: ```python test_*.py
+    pattern1 = re.findall(r'```(?:python)?\s*(test_\S+\.py)\n(.*?)```', response, re.DOTALL)
+    for filename, code in pattern1:
         save_artifact(filename.strip(), code.strip())
+        test_files.append(filename.strip())
+
+    # Pattern 2: **File: `test_*.py`** followed by code block
+    pattern2 = re.findall(r'\*\*File:\s*`(test_\S+\.py)`\*\*\s*\n+```\w*\n(.*?)```', response, re.DOTALL)
+    for filename, code in pattern2:
+        if filename.strip() not in test_files:
+            save_artifact(filename.strip(), code.strip())
+            test_files.append(filename.strip())
 
     # Save usage docs
     save_artifact("USAGE.md", f"# Usage Instructions\n\n{response}")
@@ -348,7 +383,7 @@ QUESTION FOR HUMAN: [your question here]"""
 
     return {
         "output": response,
-        "test_files": [f[0] for f in test_blocks]
+        "test_files": test_files
     }
 
 
