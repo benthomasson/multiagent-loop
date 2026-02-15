@@ -180,6 +180,9 @@ Address the reviewer's concerns in your implementation.
 the software is built. You can push back on the planner's suggestions if
 they won't work.
 
+You have access to Write, Edit, Read, Glob, and Grep tools.
+USE THE WRITE TOOL to create files in the workspace directory.
+
 ORIGINAL TASK: {task}
 
 PLANNER'S PLAN:
@@ -190,8 +193,8 @@ Provide your response in TWO parts:
 ## IMPLEMENTATION
 
 1. If pushing back on the plan, explain WHY and what you'll do instead
-2. Write the code with clear error messages and structured output
-3. Save files to the current directory (they'll be committed to git)
+2. Use the Write tool to CREATE the actual files (don't just output code in markdown)
+3. Write code with clear error messages and structured output
 
 ## SELF-REVIEW
 
@@ -320,6 +323,10 @@ def tester(code: str, task: str, reviewer_notes: str) -> dict:
 1. Create tests for this implementation
 2. Document HOW TO USE the software for the User
 
+You have access to Write, Edit, Read, Glob, Grep, and Bash tools.
+USE THE WRITE TOOL to create test files.
+USE BASH to run the tests and verify they pass.
+
 ORIGINAL TASK: {task}
 
 CODE:
@@ -395,6 +402,10 @@ def user(code: str, task: str, usage_instructions: str) -> dict:
     """
     prompt = f"""You are a user of this software. Your job is to ACTUALLY USE it
 by following the tester's instructions, then provide feedback.
+
+You have access to Read, Glob, Grep, and Bash tools.
+USE BASH to actually run the code and observe the output.
+Report what actually happened, not what you think would happen.
 
 ORIGINAL TASK: {task}
 
