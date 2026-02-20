@@ -12,6 +12,10 @@ This is a multi-agent development loop that orchestrates Claude CLI instances to
 # Run the full pipeline
 uv run supervisor.py "write a function to check if a number is prime"
 
+# Named workspaces - work on existing codebases
+uv run supervisor.py --workspace iris --init-from /path/to/iris  # Initialize once
+uv run supervisor.py --workspace iris "add a new feature"         # Then work on it
+
 # With shared understanding from Phase 0
 uv run supervisor.py --understanding workspace/SHARED_UNDERSTANDING.md "build the feature"
 
@@ -48,10 +52,21 @@ uv run agent.py --permissions   # show agent tool permissions
 ### Agent Pipeline Flow
 
 ```
-Planner (WHAT/WHY) → Implementer (HOW) → Reviewer → Tester → User
-    ↑                                                          │
-    └──────────── feedback loop (if NEEDS_IMPROVEMENT) ────────┘
+Planner (WHAT/WHY) → Implementer ←──┬────────────┐
+    ↑                    ↓          │            │
+    │                 Reviewer ─────┘            │
+    │              (if NEEDS_CHANGES)            │
+    │                    ↓                       │
+    │                 Tester ────────────────────┘
+    │              (if TESTS_FAILED)
+    │                    ↓
+    └───────────────── User
+                 (if NEEDS_IMPROVEMENT)
 ```
+
+**Inner loops** (up to 3 attempts each):
+- Reviewer → Implementer: If code needs changes, fix before testing
+- Tester → Implementer: If tests fail, fix before user tries it
 
 Each agent:
 1. Checks out their git branch, merges from main
@@ -61,9 +76,9 @@ Each agent:
 
 ### Key Design Patterns
 
-**Session Isolation**: Each agent runs in `agents/{role}/` directory. Claude CLI stores conversation history per directory, giving each agent persistent memory across iterations.
+**Session Isolation**: Each agent runs in `agents/{workspace}/{role}/` directory. Claude CLI stores conversation history per directory, giving each agent persistent memory across iterations.
 
-**Workspace Separation**: Each agent writes to `workspace/{role}/`. All can read all directories, but only write to their own.
+**Workspace Separation**: Each agent writes to `workspaces/{workspace}/{role}/`. All can read all directories, but only write to their own.
 
 **Git Coordination**: Every stage commits. Agent branches prevent conflicts. Supervisor merges to main after each stage.
 
@@ -86,7 +101,9 @@ Agents can request human input with markers like `QUESTION FOR HUMAN:`. Supervis
 
 ## Runtime Directories (gitignored)
 
-- `workspace/` - Git repo with all artifacts, agent subdirectories
-- `agents/` - Session directories for conversation isolation
+- `workspaces/{name}/` - Named workspaces, each a git repo with artifacts and agent subdirectories
+- `agents/{name}/` - Session directories per workspace for conversation isolation
 - `pids/` - PID files for running agent processes
 - `multiagent.log` - Verbose logging output
+
+Default workspace name is `default` if `--workspace` not specified.

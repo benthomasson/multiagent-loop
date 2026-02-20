@@ -28,10 +28,38 @@ import sys
 from pathlib import Path
 from datetime import datetime
 
-AGENTS_DIR = Path(__file__).parent / "agents"
-WORKSPACE = Path(__file__).parent / "workspace"
-LOG_FILE = Path(__file__).parent / "multiagent.log"
-PIDS_DIR = Path(__file__).parent / "pids"
+BASE_DIR = Path(__file__).parent
+LOG_FILE = BASE_DIR / "multiagent.log"
+PIDS_DIR = BASE_DIR / "pids"
+
+# Default workspace name for backward compatibility
+DEFAULT_WORKSPACE = "default"
+
+# Current workspace name (can be set via set_workspace())
+_current_workspace = DEFAULT_WORKSPACE
+
+
+def set_workspace(name: str) -> None:
+    """Set the current workspace name."""
+    global _current_workspace
+    _current_workspace = name
+
+
+def get_workspace_name() -> str:
+    """Get the current workspace name."""
+    return _current_workspace
+
+
+def get_workspace_dir(workspace_name: str | None = None) -> Path:
+    """Get the workspace directory for a given workspace name."""
+    name = workspace_name or _current_workspace
+    return BASE_DIR / "workspaces" / name
+
+
+def get_agents_dir(workspace_name: str | None = None) -> Path:
+    """Get the agents directory for a given workspace name."""
+    name = workspace_name or _current_workspace
+    return BASE_DIR / "agents" / name
 
 # Logging
 VERBOSE = True
@@ -191,14 +219,15 @@ def log_separator(title: str = "NEW RUN"):
 
 def init_workspace():
     """Initialize the workspace as a git repo if needed."""
-    WORKSPACE.mkdir(parents=True, exist_ok=True)
-    git_dir = WORKSPACE / ".git"
+    workspace = get_workspace_dir()
+    workspace.mkdir(parents=True, exist_ok=True)
+    git_dir = workspace / ".git"
     if not git_dir.exists():
-        log(f"Initializing workspace git repo at {WORKSPACE}")
-        git_cmd(["init"], WORKSPACE)
-        (WORKSPACE / ".gitkeep").touch()
-        git_cmd(["add", ".gitkeep"], WORKSPACE)
-        git_cmd(["commit", "-m", "Initialize workspace"], WORKSPACE)
+        log(f"Initializing workspace git repo at {workspace}")
+        git_cmd(["init"], workspace)
+        (workspace / ".gitkeep").touch()
+        git_cmd(["add", ".gitkeep"], workspace)
+        git_cmd(["commit", "-m", "Initialize workspace"], workspace)
         log("Workspace initialized")
 
 
@@ -208,26 +237,27 @@ def setup_agent_branch(role: str) -> Path:
     Returns the agent's workspace directory.
     """
     init_workspace()
+    workspace = get_workspace_dir()
 
     # Create agent's subdirectory
-    agent_workspace = WORKSPACE / role
+    agent_workspace = workspace / role
     agent_workspace.mkdir(parents=True, exist_ok=True)
     log(f"Agent workspace: {agent_workspace}")
 
     # Check if branch exists
-    result = git_cmd(["branch", "--list", role], WORKSPACE)
+    result = git_cmd(["branch", "--list", role], workspace)
     branch_exists = role in result.stdout
 
     if not branch_exists:
         log(f"Creating new branch: {role}")
-        git_cmd(["checkout", "-b", role], WORKSPACE)
+        git_cmd(["checkout", "-b", role], workspace)
     else:
         log(f"Checking out existing branch: {role}")
-        git_cmd(["checkout", role], WORKSPACE)
+        git_cmd(["checkout", role], workspace)
 
     # Merge latest from main
     log(f"Merging latest from main into {role}")
-    result = git_cmd(["merge", "main", "--no-edit"], WORKSPACE)
+    result = git_cmd(["merge", "main", "--no-edit"], workspace)
     if result.returncode != 0:
         log(f"Merge warning: {result.stderr}", "WARN")
 
@@ -236,32 +266,34 @@ def setup_agent_branch(role: str) -> Path:
 
 def commit_agent_work(role: str, message: str) -> bool:
     """Commit any changes the agent made."""
+    workspace = get_workspace_dir()
     log(f"Checking for changes in {role}/")
 
     # Stage changes in agent's directory
-    git_cmd(["add", role + "/"], WORKSPACE)
+    git_cmd(["add", role + "/"], workspace)
 
     # Check if there are changes to commit
-    result = git_cmd(["diff", "--cached", "--quiet"], WORKSPACE)
+    result = git_cmd(["diff", "--cached", "--quiet"], workspace)
     if result.returncode == 0:
         log(f"No changes to commit for {role}")
         return False  # No changes
 
     # Commit
     log(f"Committing changes for {role}: {message}")
-    git_cmd(["commit", "-m", f"[{role}] {message}"], WORKSPACE)
+    git_cmd(["commit", "-m", f"[{role}] {message}"], workspace)
     return True
 
 
 def merge_to_main(role: str) -> bool:
     """Merge agent's branch back to main."""
+    workspace = get_workspace_dir()
     log(f"Merging {role} branch back to main")
 
     # Switch to main
-    git_cmd(["checkout", "main"], WORKSPACE)
+    git_cmd(["checkout", "main"], workspace)
 
     # Merge agent's branch
-    result = git_cmd(["merge", role, "--no-edit"], WORKSPACE)
+    result = git_cmd(["merge", role, "--no-edit"], workspace)
     if result.returncode == 0:
         log(f"Successfully merged {role} to main")
     else:
@@ -271,12 +303,13 @@ def merge_to_main(role: str) -> bool:
 
 def get_workspace_context(role: str) -> str:
     """Read relevant files from workspace to provide context to the agent."""
+    workspace = get_workspace_dir()
     context_parts = []
 
     # Read shared files from main workspace
     shared_files = ["TASK.md", "SHARED_UNDERSTANDING.md", "CUMULATIVE_UNDERSTANDING.md"]
     for filename in shared_files:
-        filepath = WORKSPACE / filename
+        filepath = workspace / filename
         if filepath.exists():
             content = filepath.read_text()[:3000]  # Limit size
             context_parts.append(f"## {filename}\n\n{content}")
@@ -286,7 +319,7 @@ def get_workspace_context(role: str) -> str:
     for agent in agent_order:
         if agent == role:
             break  # Only read from previous agents
-        agent_dir = WORKSPACE / agent
+        agent_dir = workspace / agent
         if agent_dir.exists():
             for f in sorted(agent_dir.glob("*.md"))[:3]:  # Limit files
                 content = f.read_text()[:2000]
@@ -306,16 +339,19 @@ def run_agent(role: str, message: str, continue_session: bool = False,
     Run a claude prompt as a specific agent role.
 
     Each role has:
-    - Session directory (agents/{role}/) for conversation isolation
-    - Workspace subdirectory (workspace/{role}/) for file operations
+    - Session directory (agents/{workspace}/{role}/) for conversation isolation
+    - Workspace subdirectory (workspaces/{workspace}/{role}/) for file operations
     - Git branch for version control
     """
+    workspace = get_workspace_dir()
+    agents_dir = get_agents_dir()
+
     log(f"{'='*50}")
     log(f"Starting agent: {role.upper()}")
     log(f"{'='*50}")
 
     # Set up session directory (for conversation isolation)
-    agent_session_dir = AGENTS_DIR / role
+    agent_session_dir = agents_dir / role
     agent_session_dir.mkdir(parents=True, exist_ok=True)
     log(f"Session directory: {agent_session_dir}")
 
@@ -370,7 +406,7 @@ Write any output files to this directory.
         cmd.extend(["--allowedTools", ",".join(permissions["allowed_tools"])])
 
     # Add workspace directory for file access
-    cmd.extend(["--add-dir", str(WORKSPACE)])
+    cmd.extend(["--add-dir", str(workspace)])
 
     # Remove CLAUDECODE env var to allow running from within Claude Code
     env = os.environ.copy()
@@ -460,8 +496,9 @@ def show_permissions():
 def show_branches():
     """Show git branches in workspace."""
     init_workspace()
-    result = git_cmd(["branch", "-v"], WORKSPACE)
-    print("Workspace branches:")
+    workspace = get_workspace_dir()
+    result = git_cmd(["branch", "-v"], workspace)
+    print(f"Workspace branches ({get_workspace_name()}):")
     print(result.stdout)
 
 

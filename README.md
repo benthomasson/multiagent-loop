@@ -142,6 +142,7 @@ This surfaces friction points and improvement ideas throughout the pipeline, not
 │  • Verdict: APPROVED or NEEDS_CHANGES                               │
 │  • Self-review: What made review difficult?                         │
 │  → [git commit: REVIEW.md]                                          │
+│  ↑ (if NEEDS_CHANGES: loops back to IMPLEMENTER, up to 3 attempts) │
 └─────────────────────────────────────────────────────────────────────┘
                                  │
                                  ▼
@@ -150,8 +151,10 @@ This surfaces friction points and improvement ideas throughout the pipeline, not
 │  • Creates tests based on reviewer notes                            │
 │  • Documents HOW TO USE the software                                │
 │  • Provides usage instructions to User                              │
+│  • Verdict: TESTS_PASSED or TESTS_FAILED                            │
 │  • Self-review: What gaps did testing reveal?                       │
 │  → [git commit: tests + USAGE.md]                                   │
+│  ↑ (if TESTS_FAILED: loops back to IMPLEMENTER, up to 3 attempts)  │
 └─────────────────────────────────────────────────────────────────────┘
                                  │
                                  ▼
@@ -226,12 +229,32 @@ Continuous mode:
 - Add new tasks to the queue file while it's running
 - Press Ctrl+C to stop gracefully
 
+### Named Workspaces
+
+Work on existing codebases by copying them into named workspaces:
+
+```bash
+# Initialize a workspace from an existing codebase (one-time setup)
+uv run supervisor.py --workspace iris --init-from /path/to/iris
+
+# Work on the codebase
+uv run supervisor.py --workspace iris "add a new feature"
+uv run supervisor.py --workspace iris --continue "fix the bug from last run"
+
+# Multiple projects can run in parallel
+uv run supervisor.py --workspace projectA "implement auth"
+uv run supervisor.py --workspace projectB "add logging"
+```
+
+Workspaces are stored in `workspaces/{name}/` with separate agent sessions in `agents/{name}/`.
+Default workspace is `default` if `--workspace` is not specified.
+
 ### View the git history
 
 After a run, check the workspace:
 
 ```bash
-cd workspace
+cd workspaces/iris  # or workspaces/default
 git log --oneline
 ```
 
@@ -269,31 +292,33 @@ multiagent-loop/
 ├── understand.py      # Phase 0: Shared understanding builder
 ├── supervisor.py      # Pipeline orchestrator with feedback loop
 ├── agent.py           # Agent runner utility
-├── agents/            # Agent directories (session isolation)
-│   ├── understand/    # Phase 0 context
-│   ├── planner/
-│   ├── implementer/
-│   ├── reviewer/
-│   ├── tester/
-│   └── user/
+├── agents/            # Agent session directories (per workspace)
+│   └── {workspace}/   # e.g., "default", "iris", "myproject"
+│       ├── planner/
+│       ├── implementer/
+│       ├── reviewer/
+│       ├── tester/
+│       └── user/
+├── workspaces/        # Named workspaces (each a git repo)
+│   └── {workspace}/   # e.g., "default", "iris", "myproject"
+│       ├── .git/      # Full commit history
+│       ├── TASK.md    # Original task
+│       ├── PLAN.md    # Planner output
+│       ├── IMPLEMENTATION.md
+│       ├── REVIEW.md
+│       ├── USAGE.md
+│       ├── USER_FEEDBACK.md
+│       ├── ITERATION_*_SUMMARY.md
+│       ├── FINAL_SUMMARY.md
+│       └── *.py       # Generated code files
 ├── pids/              # PID files for running agents
 │   └── {role}.pid     # Contains PID of running agent process
-└── workspace/         # Output directory (git repo with artifacts)
-    ├── .git/          # Full commit history
-    ├── TASK.md        # Original task
-    ├── PLAN.md        # Planner output
-    ├── IMPLEMENTATION.md
-    ├── REVIEW.md
-    ├── USAGE.md
-    ├── USER_FEEDBACK.md
-    ├── ITERATION_*_SUMMARY.md
-    ├── FINAL_SUMMARY.md
-    └── *.py           # Generated code files
+└── multiagent.log     # Verbose logging output
 ```
 
 ## How It Works
 
-1. **Session Isolation**: Each agent has its own directory. Claude CLI stores conversation history per directory, so each agent maintains its own context.
+1. **Session Isolation**: Each agent has its own directory per workspace (`agents/{workspace}/{role}/`). Claude CLI stores conversation history per directory, so each agent maintains its own context.
 
 2. **Git Coordination**: Every stage commits artifacts. This provides checkpoints, audit trail, and async review capability.
 

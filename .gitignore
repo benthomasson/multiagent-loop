@@ -1,8 +1,10 @@
 # Agent runtime directories
-/workspace/
+/workspaces/
 /agents/
 /pids/
-/workspace*/
+
+# Legacy (single workspace)
+/workspace/
 
 # Python
 __pycache__/

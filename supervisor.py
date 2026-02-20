@@ -32,9 +32,11 @@ import json
 import os
 from pathlib import Path
 from datetime import datetime
-from agent import run_agent, finalize_agent, WORKSPACE, AGENTS_DIR, log, log_separator, LOG_FILE
-
-# WORKSPACE is imported from agent.py
+from agent import (
+    run_agent, finalize_agent, log, log_separator, LOG_FILE,
+    get_workspace_dir, get_agents_dir, set_workspace, get_workspace_name,
+    DEFAULT_WORKSPACE
+)
 
 import time
 
@@ -79,14 +81,14 @@ def git_commit(message: str, files: list[str] | None = None) -> bool:
         # Stage files
         if files:
             for f in files:
-                subprocess.run(["git", "add", f], cwd=WORKSPACE, env=env, capture_output=True)
+                subprocess.run(["git", "add", f], cwd=get_workspace_dir(), env=env, capture_output=True)
         else:
-            subprocess.run(["git", "add", "-A"], cwd=WORKSPACE, env=env, capture_output=True)
+            subprocess.run(["git", "add", "-A"], cwd=get_workspace_dir(), env=env, capture_output=True)
 
         # Check if there are changes to commit
         result = subprocess.run(
             ["git", "diff", "--cached", "--quiet"],
-            cwd=WORKSPACE, env=env, capture_output=True
+            cwd=get_workspace_dir(), env=env, capture_output=True
         )
         if result.returncode == 0:
             # No changes staged
@@ -95,7 +97,7 @@ def git_commit(message: str, files: list[str] | None = None) -> bool:
         # Commit
         subprocess.run(
             ["git", "commit", "-m", message],
-            cwd=WORKSPACE, env=env, capture_output=True
+            cwd=get_workspace_dir(), env=env, capture_output=True
         )
         return True
     except Exception as e:
@@ -104,25 +106,93 @@ def git_commit(message: str, files: list[str] | None = None) -> bool:
 
 def init_workspace():
     """Initialize the workspace directory, agents directory, and git repo."""
-    WORKSPACE.mkdir(exist_ok=True)
+    get_workspace_dir().mkdir(parents=True, exist_ok=True)
     # Pre-create agents directory to ensure it exists before any agent runs
-    AGENTS_DIR.mkdir(parents=True, exist_ok=True)
-    git_dir = WORKSPACE / ".git"
+    get_agents_dir().mkdir(parents=True, exist_ok=True)
+    git_dir = get_workspace_dir() / ".git"
     if not git_dir.exists():
         env = os.environ.copy()
         env.pop("CLAUDECODE", None)
-        subprocess.run(["git", "init"], cwd=WORKSPACE, env=env, capture_output=True)
+        subprocess.run(["git", "init"], cwd=get_workspace_dir(), env=env, capture_output=True)
         # Create initial commit
-        (WORKSPACE / ".gitkeep").touch()
-        subprocess.run(["git", "add", ".gitkeep"], cwd=WORKSPACE, env=env, capture_output=True)
+        (get_workspace_dir() / ".gitkeep").touch()
+        subprocess.run(["git", "add", ".gitkeep"], cwd=get_workspace_dir(), env=env, capture_output=True)
         subprocess.run(
             ["git", "commit", "-m", "Initialize workspace"],
-            cwd=WORKSPACE, env=env, capture_output=True
+            cwd=get_workspace_dir(), env=env, capture_output=True
         )
+
+
+def init_workspace_from(source_path: Path) -> bool:
+    """Initialize a workspace by copying from an existing codebase.
+
+    Copies all files from source_path to the workspace, initializes git,
+    and creates an initial commit with the imported code.
+
+    Returns True if successful, False otherwise.
+    """
+    import shutil
+
+    workspace = get_workspace_dir()
+    agents_dir = get_agents_dir()
+
+    # Check source exists
+    if not source_path.exists():
+        print(f"Error: Source path does not exist: {source_path}")
+        return False
+
+    if not source_path.is_dir():
+        print(f"Error: Source path is not a directory: {source_path}")
+        return False
+
+    # Create workspace directory
+    workspace.mkdir(parents=True, exist_ok=True)
+    agents_dir.mkdir(parents=True, exist_ok=True)
+
+    # Check if workspace already has content
+    if any(workspace.iterdir()):
+        existing = list(workspace.iterdir())
+        # Allow .git and .gitkeep
+        non_meta = [f for f in existing if f.name not in ['.git', '.gitkeep']]
+        if non_meta:
+            print(f"Error: Workspace '{get_workspace_name()}' already has content.")
+            print(f"  Location: {workspace}")
+            print(f"  Files: {[f.name for f in non_meta[:5]]}")
+            return False
+
+    print(f"Copying codebase from {source_path} to workspace '{get_workspace_name()}'...")
+
+    # Copy all files from source to workspace, excluding .git
+    for item in source_path.iterdir():
+        if item.name == '.git':
+            continue  # Don't copy source .git
+        dest = workspace / item.name
+        if item.is_dir():
+            shutil.copytree(item, dest)
+        else:
+            shutil.copy2(item, dest)
+
+    # Initialize git and commit
+    env = os.environ.copy()
+    env.pop("CLAUDECODE", None)
+
+    git_dir = workspace / ".git"
+    if not git_dir.exists():
+        subprocess.run(["git", "init"], cwd=workspace, env=env, capture_output=True)
+
+    subprocess.run(["git", "add", "-A"], cwd=workspace, env=env, capture_output=True)
+    subprocess.run(
+        ["git", "commit", "-m", f"Initial import from {source_path.name}"],
+        cwd=workspace, env=env, capture_output=True
+    )
+
+    print(f"Workspace '{get_workspace_name()}' initialized from {source_path}")
+    print(f"  Location: {workspace}")
+    return True
 
 def save_artifact(name: str, content: str) -> Path:
     """Save an artifact to the workspace."""
-    path = WORKSPACE / name
+    path = get_workspace_dir() / name
     path.write_text(content)
     return path
 
@@ -399,6 +469,14 @@ Provide your response in THREE parts:
 The User will follow your instructions to actually run the software.
 Make the instructions clear enough for someone (human or AI) to follow.
 
+## TEST VERDICT
+
+After running tests, provide ONE of:
+- TESTS_PASSED: All tests pass, implementation is correct
+- TESTS_FAILED: Tests fail or reveal bugs that need fixing
+
+If TESTS_FAILED, clearly describe what needs to be fixed so the implementer can address it.
+
 ## SELF-REVIEW
 
 After testing and documenting, reflect:
@@ -434,9 +512,13 @@ QUESTION FOR HUMAN: [your question here]"""
     save_artifact("USAGE.md", f"# Usage Instructions\n\n{response}")
     git_commit("[tester] Tests and usage documentation")
 
+    # Determine if tests passed
+    tests_passed = "TESTS_PASSED" in response and "TESTS_FAILED" not in response
+
     return {
         "output": response,
-        "test_files": test_files
+        "test_files": test_files,
+        "tests_passed": tests_passed
     }
 
 
@@ -523,8 +605,14 @@ def process_agent_output(agent_name: str, output: str, iteration: int) -> str:
 
 def run_iteration(task: str, iteration: int, user_feedback: str | None = None,
                   shared_understanding: str | None = None,
-                  continue_conversations: bool = False) -> dict:
-    """Run one iteration of the development loop."""
+                  continue_conversations: bool = False,
+                  max_inner_iterations: int = 3) -> dict:
+    """Run one iteration of the development loop.
+
+    Inner loops:
+    - Reviewer → Implementer (if NEEDS_CHANGES)
+    - Tester → Implementer (if tests fail)
+    """
     results = {}
 
     # Stage 1: Planning
@@ -533,25 +621,68 @@ def run_iteration(task: str, iteration: int, user_feedback: str | None = None,
     results["planner"] = process_agent_output("planner", plan_result["output"], iteration)
     print(f"\n{results['planner']}\n")
 
-    # Stage 2: Implementation
-    print(f"\n[2/5] IMPLEMENTER writing code...")
-    impl_result = implementer(results["planner"], task, None, iteration, continue_conversations)
-    results["implementer"] = process_agent_output("implementer", impl_result["output"], iteration)
-    results["files_created"] = impl_result.get("files_created", [])
-    print(f"\n{results['implementer']}\n")
+    # Stage 2 & 3: Implementation + Review loop
+    reviewer_feedback = None
+    inner_iteration = 0
 
-    # Stage 3: Review
-    print(f"\n[3/5] REVIEWER checking implementation...")
-    review_result = reviewer(results["implementer"], task, iteration, continue_conversations)
-    results["reviewer"] = process_agent_output("reviewer", review_result["output"], iteration)
-    results["approved"] = review_result["approved"]
-    print(f"\n{results['reviewer']}\n")
+    while inner_iteration < max_inner_iterations:
+        inner_iteration += 1
 
-    # Stage 4: Testing (with reviewer feed-forward)
-    print(f"\n[4/5] TESTER creating tests and usage docs...")
-    test_result = tester(results["implementer"], task, results["reviewer"], iteration, continue_conversations)
-    results["tester"] = process_agent_output("tester", test_result["output"], iteration)
-    print(f"\n{results['tester']}\n")
+        # Implementation
+        if inner_iteration == 1:
+            print(f"\n[2/5] IMPLEMENTER writing code...")
+        else:
+            print(f"\n[2/5] IMPLEMENTER fixing issues (attempt {inner_iteration})...")
+
+        impl_result = implementer(results["planner"], task, reviewer_feedback, iteration, continue_conversations or inner_iteration > 1)
+        results["implementer"] = process_agent_output("implementer", impl_result["output"], iteration)
+        results["files_created"] = impl_result.get("files_created", [])
+        print(f"\n{results['implementer']}\n")
+
+        # Review
+        print(f"\n[3/5] REVIEWER checking implementation...")
+        review_result = reviewer(results["implementer"], task, iteration, continue_conversations or inner_iteration > 1)
+        results["reviewer"] = process_agent_output("reviewer", review_result["output"], iteration)
+        results["approved"] = review_result["approved"]
+        print(f"\n{results['reviewer']}\n")
+
+        if review_result["approved"]:
+            print(f"  [Reviewer APPROVED - proceeding to tester]")
+            break
+        else:
+            print(f"  [Reviewer requested CHANGES - looping back to implementer]")
+            reviewer_feedback = results["reviewer"]
+
+    # Stage 4: Testing (with potential loop back to implementer)
+    tester_iteration = 0
+    tester_feedback = None
+
+    while tester_iteration < max_inner_iterations:
+        tester_iteration += 1
+
+        if tester_iteration == 1:
+            print(f"\n[4/5] TESTER creating tests and usage docs...")
+        else:
+            # Re-run implementer with tester feedback
+            print(f"\n[2/5] IMPLEMENTER fixing test failures (attempt {tester_iteration})...")
+            impl_result = implementer(results["planner"], task, tester_feedback, iteration, True)
+            results["implementer"] = process_agent_output("implementer", impl_result["output"], iteration)
+            results["files_created"] = impl_result.get("files_created", [])
+            print(f"\n{results['implementer']}\n")
+
+            print(f"\n[4/5] TESTER re-running tests...")
+
+        test_result = tester(results["implementer"], task, results["reviewer"], iteration, continue_conversations or tester_iteration > 1)
+        results["tester"] = process_agent_output("tester", test_result["output"], iteration)
+        results["tests_passed"] = test_result.get("tests_passed", True)
+        print(f"\n{results['tester']}\n")
+
+        if results["tests_passed"]:
+            print(f"  [Tests passed - proceeding to user]")
+            break
+        else:
+            print(f"  [Tests failed - looping back to implementer]")
+            tester_feedback = f"TESTER FEEDBACK (tests failed):\n{results['tester']}"
 
     # Stage 5: User feedback
     print(f"\n[5/5] USER trying the code...")
@@ -654,7 +785,7 @@ def load_understanding(understanding_path: str | Path) -> str:
 
 def check_human_comments(iteration: int) -> str | None:
     """Check if human added comments to the review document."""
-    review_path = WORKSPACE / f"ITERATION_{iteration}_HUMAN_REVIEW.md"
+    review_path = get_workspace_dir() / f"ITERATION_{iteration}_HUMAN_REVIEW.md"
     if not review_path.exists():
         return None
 
@@ -705,7 +836,7 @@ def request_human_input(agent_name: str, escalation: dict, iteration: int) -> st
     print(f"\n{escalation['message']}\n")
 
     # Save escalation to file
-    escalation_path = WORKSPACE / f"ESCALATION_{iteration}_{agent_name}.md"
+    escalation_path = get_workspace_dir() / f"ESCALATION_{iteration}_{agent_name}.md"
     escalation_content = f"""# Escalation from {agent_name}
 
 ## Agent's Question/Issue
@@ -784,7 +915,7 @@ def run_pipeline(task: str, max_iterations: int = 3, understanding_path: str | N
     print("SUPERVISOR: Starting development loop")
     print(f"TASK: {task}")
     print(f"MAX ITERATIONS: {max_iterations}")
-    print(f"WORKSPACE: {WORKSPACE}")
+    print(f"get_workspace_dir(): {get_workspace_dir()}")
     print("=" * 60)
 
     # Save task to workspace
@@ -819,8 +950,8 @@ def run_pipeline(task: str, max_iterations: int = 3, understanding_path: str | N
             user_feedback = results["user"]
 
             # Update cumulative understanding with learnings
-            cumulative_path = WORKSPACE / "CUMULATIVE_UNDERSTANDING.md"
-            iteration_understanding = (WORKSPACE / f"ITERATION_{iteration}_UNDERSTANDING.md").read_text()
+            cumulative_path = get_workspace_dir() / "CUMULATIVE_UNDERSTANDING.md"
+            iteration_understanding = (get_workspace_dir() / f"ITERATION_{iteration}_UNDERSTANDING.md").read_text()
 
             if cumulative_path.exists():
                 cumulative = cumulative_path.read_text()
@@ -913,7 +1044,7 @@ To continue: `uv run supervisor.py --understanding workspace/ "task" --max-itera
         "iterations": len(all_results),
         "results": all_results,
         "final_satisfied": all_results[-1]["user_satisfied"] if all_results else False,
-        "workspace": str(WORKSPACE)
+        "workspace": str(get_workspace_dir())
     }
 
 
@@ -985,13 +1116,17 @@ if __name__ == "__main__":
         print(f"       {sys.argv[0]} --continuous [options]")
         print(f"\nOptions:")
         print(f"  -h, --help            Show this help message and exit")
+        print(f"  --workspace NAME      Named workspace (default: 'default')")
         print(f"  --max-iterations N    Maximum development iterations (default: 3)")
         print(f"  --understanding PATH  Path to understanding file or directory")
         print(f"  --continue            Continue previous agent conversations (for follow-up runs)")
         print(f"  --continuous          Run in continuous mode, processing tasks from a queue file")
         print(f"  --queue PATH          Path to queue file (default: queue.txt)")
+        print(f"  --init-from PATH      Initialize workspace from existing codebase (then exit)")
         print(f"\nThe loop runs autonomously. Human reviews FINAL_REPORT.md at the end.")
         print(f"\nExamples:")
+        print(f"  {sys.argv[0]} --workspace iris --init-from /path/to/iris  # Initialize workspace")
+        print(f"  {sys.argv[0]} --workspace iris 'add a new feature'        # Work on it")
         print(f"  {sys.argv[0]} 'write a function to calculate fibonacci numbers'")
         print(f"  {sys.argv[0]} --understanding workspace/SHARED_UNDERSTANDING.md 'build the feature'")
         print(f"  {sys.argv[0]} --understanding ./context/ 'build feature'  # directory of docs")
@@ -1010,14 +1145,19 @@ if __name__ == "__main__":
         print(f"Usage: {sys.argv[0]} <task description> [options]")
         print(f"       {sys.argv[0]} --continuous [options]")
         print(f"\nOptions:")
+        print(f"  --workspace NAME      Named workspace (default: 'default')")
         print(f"  --max-iterations N    Maximum development iterations (default: 3)")
         print(f"  --understanding PATH  Path to understanding file or directory")
         print(f"  --continue            Continue previous agent conversations (for follow-up runs)")
         print(f"  --continuous          Run in continuous mode, processing tasks from a queue file")
         print(f"  --queue PATH          Path to queue file (default: queue.txt)")
+        print(f"  --init-from PATH      Initialize workspace from existing codebase (then exit)")
         print(f"\nThe loop runs autonomously. Human reviews FINAL_REPORT.md at the end.")
         print(f"\nExamples:")
+        print(f"  {sys.argv[0]} --workspace iris --init-from /path/to/iris  # Initialize workspace")
+        print(f"  {sys.argv[0]} --workspace iris 'add a new feature'        # Work on it")
         print(f"  {sys.argv[0]} 'write a function to calculate fibonacci numbers'")
+        print(f"  {sys.argv[0]} --workspace myproject 'add a new feature'")
         print(f"  {sys.argv[0]} --understanding workspace/SHARED_UNDERSTANDING.md 'build the feature'")
         print(f"  {sys.argv[0]} --understanding ./context/ 'build feature'  # directory of docs")
         print(f"  {sys.argv[0]} --max-iterations 5 'complex feature'")
@@ -1035,6 +1175,23 @@ if __name__ == "__main__":
     continue_conversations = False
     continuous_mode = False
     queue_path = DEFAULT_QUEUE_PATH
+    workspace_name = DEFAULT_WORKSPACE
+
+    if "--workspace" in args:
+        idx = args.index("--workspace")
+        workspace_name = args[idx + 1]
+        args = args[:idx] + args[idx + 2:]
+
+    # Set the workspace before any other operations
+    set_workspace(workspace_name)
+
+    # Handle --init-from early (it exits after completing)
+    if "--init-from" in args:
+        idx = args.index("--init-from")
+        source_path = Path(args[idx + 1])
+        args = args[:idx] + args[idx + 2:]
+        success = init_workspace_from(source_path)
+        sys.exit(0 if success else 1)
 
     if "--max-iterations" in args:
         idx = args.index("--max-iterations")
