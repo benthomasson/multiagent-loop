@@ -157,11 +157,13 @@ def init_workspace_from(source: str) -> bool:
 
     if not is_url:
         # Local path - convert to absolute and check it exists
-        source_path = Path(source).resolve()
+        source_path = Path(source).expanduser().resolve()
         if not source_path.exists():
             print(f"Error: Source path does not exist: {source_path}")
             return False
-        if not (source_path / ".git").exists():
+        # Check for regular repo (.git dir) or bare repo (HEAD file directly)
+        is_git_repo = (source_path / ".git").exists() or (source_path / "HEAD").exists()
+        if not is_git_repo:
             print(f"Error: Source path is not a git repository: {source_path}")
             return False
         source_str = str(source_path)
@@ -191,10 +193,10 @@ def init_workspace_from(source: str) -> bool:
     return True
 
 
-def push_workspace(branch: str = "main", create_pr: bool = False) -> bool:
+def push_workspace(branch: str = "main", create_pr: bool = False, squash: bool = True) -> bool:
     """Push workspace changes back to the remote repository.
 
-    Merges multiagent-work branch into the target branch and pushes.
+    Cleans up artifact files, squashes commits, and pushes.
     Optionally creates a pull request instead of pushing directly.
 
     Returns True if successful, False otherwise.
@@ -207,16 +209,38 @@ def push_workspace(branch: str = "main", create_pr: bool = False) -> bool:
         print(f"Error: Workspace '{get_workspace_name()}' is not a git repository")
         return False
 
-    # Check for uncommitted changes
+    # Artifact files/directories to remove before pushing
+    ARTIFACT_PATTERNS = [
+        "TASK.md", "PLAN.md", "IMPLEMENTATION.md", "REVIEW.md", "USAGE.md",
+        "USER_FEEDBACK.md", "FINAL_REPORT.md", "CUMULATIVE_UNDERSTANDING.md",
+        "ITERATION_*.md", "planner/", "implementer/", "reviewer/", "tester/", "user/"
+    ]
+
+    # Remove artifact files
+    print("Cleaning up artifact files...")
+    import glob
+    for pattern in ARTIFACT_PATTERNS:
+        for path in glob.glob(str(workspace / pattern)):
+            p = Path(path)
+            if p.is_dir():
+                import shutil
+                shutil.rmtree(p)
+                subprocess.run(["git", "rm", "-rf", str(p.relative_to(workspace))],
+                             cwd=workspace, env=env, capture_output=True)
+            elif p.exists():
+                p.unlink()
+                subprocess.run(["git", "rm", "-f", str(p.relative_to(workspace))],
+                             cwd=workspace, env=env, capture_output=True)
+
+    # Check for any uncommitted changes (including deletions)
     result = subprocess.run(
         ["git", "status", "--porcelain"],
         cwd=workspace, env=env, capture_output=True, text=True
     )
     if result.stdout.strip():
-        print("Committing uncommitted changes...")
         subprocess.run(["git", "add", "-A"], cwd=workspace, env=env, capture_output=True)
         subprocess.run(
-            ["git", "commit", "-m", "[multiagent-loop] Final changes"],
+            ["git", "commit", "-m", "[multiagent-loop] Clean up artifacts"],
             cwd=workspace, env=env, capture_output=True
         )
 
@@ -226,6 +250,32 @@ def push_workspace(branch: str = "main", create_pr: bool = False) -> bool:
         cwd=workspace, env=env, capture_output=True, text=True
     )
     current_branch = result.stdout.strip()
+
+    # Find the original commit before multiagent-loop started
+    result = subprocess.run(
+        ["git", "log", "--oneline", f"origin/{branch}..HEAD"],
+        cwd=workspace, env=env, capture_output=True, text=True
+    )
+    commit_count = len([l for l in result.stdout.strip().split('\n') if l])
+
+    if squash and commit_count > 1:
+        print(f"Squashing {commit_count} commits...")
+        # Get the commit message from the task
+        task_file = workspace / "TASK.md"
+        if task_file.exists():
+            task_desc = task_file.read_text().strip()[:200]
+        else:
+            task_desc = "multiagent-loop changes"
+
+        # Soft reset to origin and recommit
+        subprocess.run(
+            ["git", "reset", "--soft", f"origin/{branch}"],
+            cwd=workspace, env=env, capture_output=True
+        )
+        subprocess.run(
+            ["git", "commit", "-m", f"{task_desc}\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>"],
+            cwd=workspace, env=env, capture_output=True
+        )
 
     if create_pr:
         # Push the working branch and create a PR
@@ -1210,6 +1260,7 @@ if __name__ == "__main__":
         print(f"  --init-from PATH|URL  Clone repo into workspace (local path or git URL)")
         print(f"  --push                Push workspace changes back to origin (then exit)")
         print(f"  --pr                  Create a pull request instead of pushing directly")
+        print(f"  --no-squash           Don't squash commits when pushing (default: squash)")
         print(f"\nThe loop runs autonomously. Human reviews FINAL_REPORT.md at the end.")
         print(f"\nExamples:")
         print(f"  {sys.argv[0]} --workspace iris --init-from /path/to/iris  # Clone local repo")
@@ -1241,6 +1292,7 @@ if __name__ == "__main__":
         print(f"  --init-from PATH|URL  Clone repo into workspace (local path or git URL)")
         print(f"  --push                Push workspace changes back to origin (then exit)")
         print(f"  --pr                  Create a pull request instead of pushing directly")
+        print(f"  --no-squash           Don't squash commits when pushing (default: squash)")
         print(f"\nThe loop runs autonomously. Human reviews FINAL_REPORT.md at the end.")
         print(f"\nExamples:")
         print(f"  {sys.argv[0]} --workspace iris --init-from /path/to/iris  # Initialize workspace")
@@ -1285,11 +1337,14 @@ if __name__ == "__main__":
     # Handle --push and --pr early (they exit after completing)
     if "--push" in args or "--pr" in args:
         create_pr = "--pr" in args
+        squash = "--no-squash" not in args
         if "--push" in args:
             args.remove("--push")
         if "--pr" in args:
             args.remove("--pr")
-        success = push_workspace(branch="main", create_pr=create_pr)
+        if "--no-squash" in args:
+            args.remove("--no-squash")
+        success = push_workspace(branch="main", create_pr=create_pr, squash=squash)
         sys.exit(0 if success else 1)
 
     if "--max-iterations" in args:
