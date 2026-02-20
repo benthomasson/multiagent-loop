@@ -18,6 +18,10 @@ uv run supervisor.py --understanding workspace/SHARED_UNDERSTANDING.md "build th
 # Continue previous agent conversations (for follow-up runs)
 uv run supervisor.py --continue "fix the bug from last run"
 
+# Continuous mode - process tasks from a queue file
+uv run supervisor.py --continuous                    # uses queue.txt
+uv run supervisor.py --continuous --queue tasks.txt  # custom queue file
+
 # Build shared understanding interactively (Phase 0)
 uv run understand.py "build a REST API for user management"
 

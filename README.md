@@ -200,6 +200,32 @@ uv run supervisor.py --continue "fix the bug identified in the last run"
 uv run supervisor.py --continue --understanding workspace/ --max-iterations 2 "add input validation"
 ```
 
+### Continuous Mode
+
+Process tasks from a queue file, running unattended:
+
+```bash
+# Create a queue of tasks
+echo "write a hello world function" > queue.txt
+echo "add error handling" >> queue.txt
+echo "write unit tests" >> queue.txt
+
+# Start continuous mode
+uv run supervisor.py --continuous
+
+# With options
+uv run supervisor.py --continuous --max-iterations 2
+uv run supervisor.py --continuous --queue my_tasks.txt
+```
+
+Continuous mode:
+- Reads the first task from the queue file
+- Runs the full pipeline on it
+- Removes the completed task from the queue
+- When queue is empty, sleeps 60 seconds then checks again
+- Add new tasks to the queue file while it's running
+- Press Ctrl+C to stop gracefully
+
 ### View the git history
 
 After a run, check the workspace:
