@@ -273,7 +273,7 @@ def push_workspace(branch: str = "main", create_pr: bool = False, squash: bool =
             cwd=workspace, env=env, capture_output=True
         )
         subprocess.run(
-            ["git", "commit", "-m", f"{task_desc}\n\nCo-Authored-By: multiagent-loop <noreply@anthropic.com>\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>"],
+            ["git", "commit", "-m", f"{task_desc}\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>"],
             cwd=workspace, env=env, capture_output=True
         )
 
