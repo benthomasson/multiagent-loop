@@ -32,9 +32,43 @@ import json
 import os
 from pathlib import Path
 from datetime import datetime
-from agent import run_agent, finalize_agent, WORKSPACE, log, log_separator, LOG_FILE
+from agent import run_agent, finalize_agent, WORKSPACE, AGENTS_DIR, log, log_separator, LOG_FILE
 
 # WORKSPACE is imported from agent.py
+
+import time
+
+# Queue file handling for continuous mode
+DEFAULT_QUEUE_PATH = Path("queue.txt")
+
+def read_queue(queue_path: Path) -> list[str]:
+    """Read all tasks from the queue file. Returns empty list if file doesn't exist."""
+    if not queue_path.exists():
+        return []
+    content = queue_path.read_text().strip()
+    if not content:
+        return []
+    return [line.strip() for line in content.split('\n') if line.strip()]
+
+
+def pop_task_from_queue(queue_path: Path) -> str | None:
+    """Read and remove the first task from the queue file. Returns None if empty."""
+    tasks = read_queue(queue_path)
+    if not tasks:
+        return None
+
+    # Get first task
+    task = tasks[0]
+
+    # Write remaining tasks back
+    remaining = tasks[1:]
+    if remaining:
+        queue_path.write_text('\n'.join(remaining) + '\n')
+    else:
+        queue_path.write_text('')
+
+    return task
+
 
 def git_commit(message: str, files: list[str] | None = None) -> bool:
     """Commit changes to git with the given message."""
@@ -69,8 +103,10 @@ def git_commit(message: str, files: list[str] | None = None) -> bool:
         return False
 
 def init_workspace():
-    """Initialize the workspace directory and git repo."""
+    """Initialize the workspace directory, agents directory, and git repo."""
     WORKSPACE.mkdir(exist_ok=True)
+    # Pre-create agents directory to ensure it exists before any agent runs
+    AGENTS_DIR.mkdir(parents=True, exist_ok=True)
     git_dir = WORKSPACE / ".git"
     if not git_dir.exists():
         env = os.environ.copy()
@@ -182,8 +218,13 @@ Address the reviewer's concerns in your implementation.
 the software is built. You can push back on the planner's suggestions if
 they won't work.
 
-You have access to Write, Edit, Read, Glob, and Grep tools.
-USE THE WRITE TOOL to create files in the workspace directory.
+You have access to Read, Glob, Grep, Write, and Edit tools.
+
+IMPORTANT - How to modify code:
+- To MODIFY EXISTING FILES: First use Read to read the file, then use the EDIT TOOL to make changes
+- To CREATE NEW FILES: Use the Write tool
+- ALWAYS read existing files before editing them
+- The Edit tool replaces specific text - provide exact old_string and new_string
 
 ORIGINAL TASK: {task}
 
@@ -195,8 +236,10 @@ Provide your response in TWO parts:
 ## IMPLEMENTATION
 
 1. If pushing back on the plan, explain WHY and what you'll do instead
-2. Use the Write tool to CREATE the actual files (don't just output code in markdown)
-3. Write code with clear error messages and structured output
+2. For EXISTING files: Use Read to examine them, then Edit to modify them
+3. For NEW files: Use Write to create them
+4. Do NOT just output code in markdown - actually use the tools to modify/create files
+5. Write code with clear error messages and structured output
 
 ## SELF-REVIEW
 
@@ -206,7 +249,7 @@ After implementing, reflect:
 3. What would make your job easier next time?
 4. Any concerns about this implementation the reviewer should focus on?
 
-Provide the implementation code in fenced code blocks with filenames.
+Use the Edit and Write tools to actually modify/create files - do not just output code in markdown.
 
 If you need clarification or are stuck, escalate to a human:
 QUESTION FOR HUMAN: [your question here]"""
@@ -874,13 +917,79 @@ To continue: `uv run supervisor.py --understanding workspace/ "task" --max-itera
     }
 
 
+def run_continuous(queue_path: Path, max_iterations: int = 3,
+                   understanding_path: str | None = None,
+                   continue_conversations: bool = False) -> None:
+    """Run the pipeline continuously, processing tasks from a queue file.
+
+    Loops forever until interrupted with Ctrl+C. When the queue is empty,
+    sleeps for 60 seconds then checks again.
+    """
+    print("=" * 60)
+    print("SUPERVISOR: Starting continuous mode")
+    print(f"Queue file: {queue_path}")
+    print(f"Max iterations per task: {max_iterations}")
+    print("Press Ctrl+C to stop")
+    print("=" * 60)
+
+    tasks_completed = 0
+
+    try:
+        while True:
+            task = pop_task_from_queue(queue_path)
+
+            if task:
+                tasks_completed += 1
+                print(f"\n{'='*60}")
+                print(f"CONTINUOUS MODE: Processing task {tasks_completed}")
+                print(f"Task: {task}")
+                print("=" * 60)
+
+                log_separator(f"CONTINUOUS TASK {tasks_completed}: {task[:50]}")
+
+                try:
+                    result = run_pipeline(
+                        task=task,
+                        max_iterations=max_iterations,
+                        understanding_path=understanding_path,
+                        continue_conversations=continue_conversations
+                    )
+
+                    status = "SATISFIED" if result["final_satisfied"] else "INCOMPLETE"
+                    print(f"\n[Continuous] Task {tasks_completed} finished: {status}")
+                    print(f"[Continuous] Iterations: {result['iterations']}")
+
+                except Exception as e:
+                    print(f"\n[Continuous] Task {tasks_completed} failed with error: {e}")
+                    log(f"ERROR in task {tasks_completed}: {e}")
+
+                # Check remaining tasks
+                remaining = read_queue(queue_path)
+                print(f"[Continuous] Remaining tasks in queue: {len(remaining)}")
+
+            else:
+                print(f"\n[Continuous] Queue empty. Sleeping 60 seconds... (Ctrl+C to exit)")
+                time.sleep(60)
+
+    except KeyboardInterrupt:
+        print(f"\n\n{'='*60}")
+        print("SUPERVISOR: Continuous mode stopped by user")
+        print(f"Tasks completed: {tasks_completed}")
+        print("=" * 60)
+
+
 if __name__ == "__main__":
-    if len(sys.argv) < 2:
+    # Handle --help / -h explicitly to prevent it being treated as a task
+    if "-h" in sys.argv or "--help" in sys.argv:
         print(f"Usage: {sys.argv[0]} <task description> [options]")
+        print(f"       {sys.argv[0]} --continuous [options]")
         print(f"\nOptions:")
+        print(f"  -h, --help            Show this help message and exit")
         print(f"  --max-iterations N    Maximum development iterations (default: 3)")
         print(f"  --understanding PATH  Path to understanding file or directory")
         print(f"  --continue            Continue previous agent conversations (for follow-up runs)")
+        print(f"  --continuous          Run in continuous mode, processing tasks from a queue file")
+        print(f"  --queue PATH          Path to queue file (default: queue.txt)")
         print(f"\nThe loop runs autonomously. Human reviews FINAL_REPORT.md at the end.")
         print(f"\nExamples:")
         print(f"  {sys.argv[0]} 'write a function to calculate fibonacci numbers'")
@@ -888,6 +997,35 @@ if __name__ == "__main__":
         print(f"  {sys.argv[0]} --understanding ./context/ 'build feature'  # directory of docs")
         print(f"  {sys.argv[0]} --max-iterations 5 'complex feature'")
         print(f"  {sys.argv[0]} --continue 'fix the bug identified in the last run'")
+        print(f"\nContinuous mode:")
+        print(f"  {sys.argv[0]} --continuous")
+        print(f"  {sys.argv[0]} --continuous --queue my_tasks.txt")
+        print(f"  {sys.argv[0]} --continuous --max-iterations 5")
+        sys.exit(0)
+
+    # Check for --continuous flag first since it doesn't require a task argument
+    has_continuous = "--continuous" in sys.argv
+
+    if len(sys.argv) < 2:
+        print(f"Usage: {sys.argv[0]} <task description> [options]")
+        print(f"       {sys.argv[0]} --continuous [options]")
+        print(f"\nOptions:")
+        print(f"  --max-iterations N    Maximum development iterations (default: 3)")
+        print(f"  --understanding PATH  Path to understanding file or directory")
+        print(f"  --continue            Continue previous agent conversations (for follow-up runs)")
+        print(f"  --continuous          Run in continuous mode, processing tasks from a queue file")
+        print(f"  --queue PATH          Path to queue file (default: queue.txt)")
+        print(f"\nThe loop runs autonomously. Human reviews FINAL_REPORT.md at the end.")
+        print(f"\nExamples:")
+        print(f"  {sys.argv[0]} 'write a function to calculate fibonacci numbers'")
+        print(f"  {sys.argv[0]} --understanding workspace/SHARED_UNDERSTANDING.md 'build the feature'")
+        print(f"  {sys.argv[0]} --understanding ./context/ 'build feature'  # directory of docs")
+        print(f"  {sys.argv[0]} --max-iterations 5 'complex feature'")
+        print(f"  {sys.argv[0]} --continue 'fix the bug identified in the last run'")
+        print(f"\nContinuous mode:")
+        print(f"  {sys.argv[0]} --continuous")
+        print(f"  {sys.argv[0]} --continuous --queue my_tasks.txt")
+        print(f"  {sys.argv[0]} --continuous --max-iterations 5")
         sys.exit(1)
 
     # Parse args
@@ -895,6 +1033,8 @@ if __name__ == "__main__":
     max_iterations = 3
     understanding_path = None
     continue_conversations = False
+    continuous_mode = False
+    queue_path = DEFAULT_QUEUE_PATH
 
     if "--max-iterations" in args:
         idx = args.index("--max-iterations")
@@ -911,8 +1051,32 @@ if __name__ == "__main__":
         continue_conversations = True
         args = args[:idx] + args[idx + 1:]
 
-    task = " ".join(args)
-    result = run_pipeline(task, max_iterations, understanding_path, continue_conversations)
+    if "--continuous" in args:
+        idx = args.index("--continuous")
+        continuous_mode = True
+        args = args[:idx] + args[idx + 1:]
 
-    print(f"\nWorkspace: {result['workspace']}")
-    print(f"Run 'git log --oneline' in the workspace to see the commit history.")
+    if "--queue" in args:
+        idx = args.index("--queue")
+        queue_path = Path(args[idx + 1])
+        args = args[:idx] + args[idx + 2:]
+
+    if continuous_mode:
+        # Run in continuous mode
+        run_continuous(
+            queue_path=queue_path,
+            max_iterations=max_iterations,
+            understanding_path=understanding_path,
+            continue_conversations=continue_conversations
+        )
+    else:
+        # Run single task
+        task = " ".join(args)
+        if not task:
+            print("Error: No task specified. Use --continuous for queue mode or provide a task.")
+            sys.exit(1)
+
+        result = run_pipeline(task, max_iterations, understanding_path, continue_conversations)
+
+        print(f"\nWorkspace: {result['workspace']}")
+        print(f"Run 'git log --oneline' in the workspace to see the commit history.")
