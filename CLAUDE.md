@@ -13,8 +13,11 @@ This is a multi-agent development loop that orchestrates Claude CLI instances to
 uv run supervisor.py "write a function to check if a number is prime"
 
 # Named workspaces - work on existing codebases
-uv run supervisor.py --workspace iris --init-from /path/to/iris  # Initialize once
-uv run supervisor.py --workspace iris "add a new feature"         # Then work on it
+uv run supervisor.py --workspace iris --init-from /path/to/iris  # Clone local repo
+uv run supervisor.py --workspace iris --init-from git@github.com:user/repo.git  # Or clone URL
+uv run supervisor.py --workspace iris "add a new feature"         # Work on it
+uv run supervisor.py --workspace iris --push                      # Push changes back
+uv run supervisor.py --workspace iris --pr                        # Or create a PR
 
 # With shared understanding from Phase 0
 uv run supervisor.py --understanding workspace/SHARED_UNDERSTANDING.md "build the feature"

@@ -231,22 +231,28 @@ Continuous mode:
 
 ### Named Workspaces
 
-Work on existing codebases by copying them into named workspaces:
+Clone existing repos into named workspaces, work on them, and push back:
 
 ```bash
-# Initialize a workspace from an existing codebase (one-time setup)
+# Clone a repo into a workspace (local path or git URL)
 uv run supervisor.py --workspace iris --init-from /path/to/iris
+uv run supervisor.py --workspace myapp --init-from git@github.com:user/myapp.git
 
 # Work on the codebase
 uv run supervisor.py --workspace iris "add a new feature"
 uv run supervisor.py --workspace iris --continue "fix the bug from last run"
+
+# Push changes back when done
+uv run supervisor.py --workspace iris --push    # Push directly to main
+uv run supervisor.py --workspace iris --pr      # Or create a pull request
 
 # Multiple projects can run in parallel
 uv run supervisor.py --workspace projectA "implement auth"
 uv run supervisor.py --workspace projectB "add logging"
 ```
 
-Workspaces are stored in `workspaces/{name}/` with separate agent sessions in `agents/{name}/`.
+Workspaces are cloned into `workspaces/{name}/` with full git history and remote.
+Work happens on a `multiagent-work` branch, merged to main on push.
 Default workspace is `default` if `--workspace` is not specified.
 
 ### View the git history

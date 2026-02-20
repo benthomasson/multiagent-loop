@@ -123,36 +123,23 @@ def init_workspace():
         )
 
 
-def init_workspace_from(source_path: Path) -> bool:
-    """Initialize a workspace by copying from an existing codebase.
+def init_workspace_from(source: str) -> bool:
+    """Initialize a workspace by cloning from a git repository.
 
-    Copies all files from source_path to the workspace, initializes git,
-    and creates an initial commit with the imported code.
+    Accepts either a local path or a git URL. Clones the repo into the workspace
+    directory, preserving git history and remote configuration for pushing back.
 
     Returns True if successful, False otherwise.
     """
-    import shutil
-
     workspace = get_workspace_dir()
     agents_dir = get_agents_dir()
 
-    # Check source exists
-    if not source_path.exists():
-        print(f"Error: Source path does not exist: {source_path}")
-        return False
+    env = os.environ.copy()
+    env.pop("CLAUDECODE", None)
 
-    if not source_path.is_dir():
-        print(f"Error: Source path is not a directory: {source_path}")
-        return False
-
-    # Create workspace directory
-    workspace.mkdir(parents=True, exist_ok=True)
-    agents_dir.mkdir(parents=True, exist_ok=True)
-
-    # Check if workspace already has content
-    if any(workspace.iterdir()):
+    # Check if workspace already exists
+    if workspace.exists() and any(workspace.iterdir()):
         existing = list(workspace.iterdir())
-        # Allow .git and .gitkeep
         non_meta = [f for f in existing if f.name not in ['.git', '.gitkeep']]
         if non_meta:
             print(f"Error: Workspace '{get_workspace_name()}' already has content.")
@@ -160,35 +147,133 @@ def init_workspace_from(source_path: Path) -> bool:
             print(f"  Files: {[f.name for f in non_meta[:5]]}")
             return False
 
-    print(f"Copying codebase from {source_path} to workspace '{get_workspace_name()}'...")
+    # Ensure parent directories exist
+    workspace.parent.mkdir(parents=True, exist_ok=True)
+    agents_dir.mkdir(parents=True, exist_ok=True)
 
-    # Copy all files from source to workspace, excluding .git
-    for item in source_path.iterdir():
-        if item.name == '.git':
-            continue  # Don't copy source .git
-        dest = workspace / item.name
-        if item.is_dir():
-            shutil.copytree(item, dest)
-        else:
-            shutil.copy2(item, dest)
+    # Determine if source is a URL or local path
+    source_str = str(source)
+    is_url = source_str.startswith(('git@', 'https://', 'http://', 'ssh://'))
 
-    # Initialize git and commit
-    env = os.environ.copy()
-    env.pop("CLAUDECODE", None)
+    if not is_url:
+        # Local path - convert to absolute and check it exists
+        source_path = Path(source).resolve()
+        if not source_path.exists():
+            print(f"Error: Source path does not exist: {source_path}")
+            return False
+        if not (source_path / ".git").exists():
+            print(f"Error: Source path is not a git repository: {source_path}")
+            return False
+        source_str = str(source_path)
 
-    git_dir = workspace / ".git"
-    if not git_dir.exists():
-        subprocess.run(["git", "init"], cwd=workspace, env=env, capture_output=True)
+    print(f"Cloning {source_str} to workspace '{get_workspace_name()}'...")
 
-    subprocess.run(["git", "add", "-A"], cwd=workspace, env=env, capture_output=True)
+    # Clone the repository
+    result = subprocess.run(
+        ["git", "clone", source_str, str(workspace)],
+        env=env, capture_output=True, text=True
+    )
+
+    if result.returncode != 0:
+        print(f"Error: git clone failed: {result.stderr}")
+        return False
+
+    # Create a working branch for multiagent-loop work
     subprocess.run(
-        ["git", "commit", "-m", f"Initial import from {source_path.name}"],
+        ["git", "checkout", "-b", "multiagent-work"],
         cwd=workspace, env=env, capture_output=True
     )
 
-    print(f"Workspace '{get_workspace_name()}' initialized from {source_path}")
+    print(f"Workspace '{get_workspace_name()}' cloned from {source_str}")
     print(f"  Location: {workspace}")
+    print(f"  Branch: multiagent-work")
+    print(f"  Use --push to push changes back when done")
     return True
+
+
+def push_workspace(branch: str = "main", create_pr: bool = False) -> bool:
+    """Push workspace changes back to the remote repository.
+
+    Merges multiagent-work branch into the target branch and pushes.
+    Optionally creates a pull request instead of pushing directly.
+
+    Returns True if successful, False otherwise.
+    """
+    workspace = get_workspace_dir()
+    env = os.environ.copy()
+    env.pop("CLAUDECODE", None)
+
+    if not workspace.exists() or not (workspace / ".git").exists():
+        print(f"Error: Workspace '{get_workspace_name()}' is not a git repository")
+        return False
+
+    # Check for uncommitted changes
+    result = subprocess.run(
+        ["git", "status", "--porcelain"],
+        cwd=workspace, env=env, capture_output=True, text=True
+    )
+    if result.stdout.strip():
+        print("Committing uncommitted changes...")
+        subprocess.run(["git", "add", "-A"], cwd=workspace, env=env, capture_output=True)
+        subprocess.run(
+            ["git", "commit", "-m", "[multiagent-loop] Final changes"],
+            cwd=workspace, env=env, capture_output=True
+        )
+
+    # Get current branch
+    result = subprocess.run(
+        ["git", "branch", "--show-current"],
+        cwd=workspace, env=env, capture_output=True, text=True
+    )
+    current_branch = result.stdout.strip()
+
+    if create_pr:
+        # Push the working branch and create a PR
+        print(f"Pushing {current_branch} branch...")
+        result = subprocess.run(
+            ["git", "push", "-u", "origin", current_branch],
+            cwd=workspace, env=env, capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            print(f"Error pushing: {result.stderr}")
+            return False
+
+        print(f"Creating pull request...")
+        result = subprocess.run(
+            ["gh", "pr", "create", "--fill", "--base", branch],
+            cwd=workspace, env=env, capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            print(f"Error creating PR: {result.stderr}")
+            print("You can create the PR manually or push directly with --push")
+            return False
+
+        print(f"Pull request created: {result.stdout.strip()}")
+        return True
+    else:
+        # Merge into target branch and push directly
+        print(f"Merging {current_branch} into {branch}...")
+        subprocess.run(["git", "checkout", branch], cwd=workspace, env=env, capture_output=True)
+        result = subprocess.run(
+            ["git", "merge", current_branch, "--no-edit"],
+            cwd=workspace, env=env, capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            print(f"Error merging: {result.stderr}")
+            return False
+
+        print(f"Pushing to origin/{branch}...")
+        result = subprocess.run(
+            ["git", "push", "origin", branch],
+            cwd=workspace, env=env, capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            print(f"Error pushing: {result.stderr}")
+            return False
+
+        print(f"Successfully pushed to origin/{branch}")
+        return True
+
 
 def save_artifact(name: str, content: str) -> Path:
     """Save an artifact to the workspace."""
@@ -1122,20 +1207,22 @@ if __name__ == "__main__":
         print(f"  --continue            Continue previous agent conversations (for follow-up runs)")
         print(f"  --continuous          Run in continuous mode, processing tasks from a queue file")
         print(f"  --queue PATH          Path to queue file (default: queue.txt)")
-        print(f"  --init-from PATH      Initialize workspace from existing codebase (then exit)")
+        print(f"  --init-from PATH|URL  Clone repo into workspace (local path or git URL)")
+        print(f"  --push                Push workspace changes back to origin (then exit)")
+        print(f"  --pr                  Create a pull request instead of pushing directly")
         print(f"\nThe loop runs autonomously. Human reviews FINAL_REPORT.md at the end.")
         print(f"\nExamples:")
-        print(f"  {sys.argv[0]} --workspace iris --init-from /path/to/iris  # Initialize workspace")
+        print(f"  {sys.argv[0]} --workspace iris --init-from /path/to/iris  # Clone local repo")
+        print(f"  {sys.argv[0]} --workspace iris --init-from git@github.com:user/repo.git")
         print(f"  {sys.argv[0]} --workspace iris 'add a new feature'        # Work on it")
+        print(f"  {sys.argv[0]} --workspace iris --push                     # Push changes back")
+        print(f"  {sys.argv[0]} --workspace iris --pr                       # Create a PR instead")
         print(f"  {sys.argv[0]} 'write a function to calculate fibonacci numbers'")
-        print(f"  {sys.argv[0]} --understanding workspace/SHARED_UNDERSTANDING.md 'build the feature'")
-        print(f"  {sys.argv[0]} --understanding ./context/ 'build feature'  # directory of docs")
         print(f"  {sys.argv[0]} --max-iterations 5 'complex feature'")
         print(f"  {sys.argv[0]} --continue 'fix the bug identified in the last run'")
         print(f"\nContinuous mode:")
         print(f"  {sys.argv[0]} --continuous")
         print(f"  {sys.argv[0]} --continuous --queue my_tasks.txt")
-        print(f"  {sys.argv[0]} --continuous --max-iterations 5")
         sys.exit(0)
 
     # Check for --continuous flag first since it doesn't require a task argument
@@ -1151,7 +1238,9 @@ if __name__ == "__main__":
         print(f"  --continue            Continue previous agent conversations (for follow-up runs)")
         print(f"  --continuous          Run in continuous mode, processing tasks from a queue file")
         print(f"  --queue PATH          Path to queue file (default: queue.txt)")
-        print(f"  --init-from PATH      Initialize workspace from existing codebase (then exit)")
+        print(f"  --init-from PATH|URL  Clone repo into workspace (local path or git URL)")
+        print(f"  --push                Push workspace changes back to origin (then exit)")
+        print(f"  --pr                  Create a pull request instead of pushing directly")
         print(f"\nThe loop runs autonomously. Human reviews FINAL_REPORT.md at the end.")
         print(f"\nExamples:")
         print(f"  {sys.argv[0]} --workspace iris --init-from /path/to/iris  # Initialize workspace")
@@ -1188,9 +1277,19 @@ if __name__ == "__main__":
     # Handle --init-from early (it exits after completing)
     if "--init-from" in args:
         idx = args.index("--init-from")
-        source_path = Path(args[idx + 1])
+        source = args[idx + 1]  # Can be path or URL
         args = args[:idx] + args[idx + 2:]
-        success = init_workspace_from(source_path)
+        success = init_workspace_from(source)
+        sys.exit(0 if success else 1)
+
+    # Handle --push and --pr early (they exit after completing)
+    if "--push" in args or "--pr" in args:
+        create_pr = "--pr" in args
+        if "--push" in args:
+            args.remove("--push")
+        if "--pr" in args:
+            args.remove("--pr")
+        success = push_workspace(branch="main", create_pr=create_pr)
         sys.exit(0 if success else 1)
 
     if "--max-iterations" in args:
