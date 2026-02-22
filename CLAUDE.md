@@ -98,13 +98,53 @@ Each agent:
 | tester | Read, Write, Edit, Glob, Grep, Bash | Create and run tests |
 | user | Read, Glob, Grep, Bash, Write | Run code, write feedback |
 
+### Structured Verdicts
+
+All agents (reviewer, tester, user) emit a structured verdict block at the end of their output:
+
+```
+## Verdict
+STATUS: APPROVED
+OPEN_ISSUES: none
+```
+
+or with issues:
+
+```
+## Verdict
+STATUS: NEEDS_CHANGES
+OPEN_ISSUES:
+- specific issue 1
+- specific issue 2
+```
+
+Valid statuses: `APPROVED`/`NEEDS_CHANGES` (reviewer), `TESTS_PASSED`/`TESTS_FAILED` (tester), `SATISFIED`/`NEEDS_IMPROVEMENT` (user).
+
+The supervisor parses `STATUS` and `OPEN_ISSUES` as separate fields. An **exit gate** checks for contradictions: if an agent declares a positive status but lists open issues, the supervisor overrides the verdict (reviewer/tester) or escalates to a human (user).
+
 ### Escalation
 
 Agents can request human input with markers like `QUESTION FOR HUMAN:`. Supervisor pauses for input when detected.
 
+### Iteration Entries
+
+Each agent's full output is saved to `entries/iteration-{N}/{role}.md` in the workspace. This provides an immutable audit trail without the truncation of `ITERATION_N_UNDERSTANDING.md`. Inner loop re-runs overwrite the same entry file (captures final state per role per iteration).
+
+### Beliefs Integration (Optional)
+
+If the `beliefs` CLI is installed, the supervisor registers claims after each stage:
+- **Planner** decisions → `AXIOM` claims
+- **Implementer** files → `DERIVED` claims
+- **Reviewer** issues → `WARNING` claims
+- **Tester** results → `OBSERVATION` claims
+
+Before the user stage, `beliefs compact` is injected into context. The exit gate also checks: if the user is SATISFIED but active WARNINGs exist, it escalates to a human. All beliefs operations silently no-op if the CLI isn't installed.
+
 ## Runtime Directories (gitignored)
 
 - `workspaces/{name}/` - Named workspaces, each a git repo with artifacts and agent subdirectories
+  - `entries/iteration-{N}/` - Full agent outputs per iteration (planner.md, implementer.md, etc.)
+  - `beliefs.md` / `nogoods.md` - Beliefs system state (if `beliefs` CLI available)
 - `agents/{name}/` - Session directories per workspace for conversation isolation
 - `pids/` - PID files for running agent processes
 - `multiagent.log` - Verbose logging output

@@ -213,7 +213,8 @@ def push_workspace(branch: str = "main", create_pr: bool = False, squash: bool =
     ARTIFACT_PATTERNS = [
         "TASK.md", "PLAN.md", "IMPLEMENTATION.md", "REVIEW.md", "USAGE.md",
         "USER_FEEDBACK.md", "FINAL_REPORT.md", "CUMULATIVE_UNDERSTANDING.md",
-        "ITERATION_*.md", "planner/", "implementer/", "reviewer/", "tester/", "user/"
+        "ITERATION_*.md", "planner/", "implementer/", "reviewer/", "tester/", "user/",
+        "entries/", "beliefs.md", "nogoods.md"
     ]
 
     # Remove artifact files
@@ -330,6 +331,169 @@ def save_artifact(name: str, content: str) -> Path:
     path = get_workspace_dir() / name
     path.write_text(content)
     return path
+
+
+def parse_verdict(response: str) -> dict:
+    """Parse a structured verdict block from agent output.
+
+    Expects a block like:
+        ## Verdict
+        STATUS: APPROVED
+        OPEN_ISSUES: none
+
+    or:
+        ## Verdict
+        STATUS: NEEDS_CHANGES
+        OPEN_ISSUES:
+        - issue 1
+        - issue 2
+
+    Falls back to legacy string matching if the structured block isn't found.
+    """
+    import re
+
+    result = {"status": None, "open_issues": []}
+
+    # Try structured format first
+    verdict_match = re.search(
+        r'## Verdict\s*\n'
+        r'STATUS:\s*(\S+)\s*\n'
+        r'(?:OPEN_ISSUES:\s*(.*?))?(?=\n## |\Z)',
+        response, re.DOTALL
+    )
+
+    if verdict_match:
+        result["status"] = verdict_match.group(1).strip()
+        issues_text = verdict_match.group(2)
+        if issues_text:
+            issues_text = issues_text.strip()
+            if issues_text.lower() != "none" and issues_text:
+                result["open_issues"] = [
+                    line.strip().lstrip("- ").strip()
+                    for line in issues_text.split('\n')
+                    if line.strip() and line.strip() != "-"
+                ]
+        return result
+
+    # Legacy fallback — scan for keywords
+    if "APPROVED" in response and "NEEDS_CHANGES" not in response:
+        result["status"] = "APPROVED"
+    elif "NEEDS_CHANGES" in response:
+        result["status"] = "NEEDS_CHANGES"
+    elif "TESTS_PASSED" in response and "TESTS_FAILED" not in response:
+        result["status"] = "TESTS_PASSED"
+    elif "TESTS_FAILED" in response:
+        result["status"] = "TESTS_FAILED"
+    elif "SATISFIED" in response and "NEEDS_IMPROVEMENT" not in response:
+        result["status"] = "SATISFIED"
+    elif "NEEDS_IMPROVEMENT" in response:
+        result["status"] = "NEEDS_IMPROVEMENT"
+
+    return result
+
+
+def apply_exit_gate(verdict: dict, agent_type: str) -> dict:
+    """Check for contradictions: positive status + open issues.
+
+    For reviewer/tester: overrides to negative status.
+    For user: sets escalate flag for human review.
+    """
+    if not verdict.get("open_issues"):
+        return verdict
+
+    status = verdict.get("status", "")
+
+    positive_to_negative = {
+        "reviewer": ("APPROVED", "NEEDS_CHANGES"),
+        "tester": ("TESTS_PASSED", "TESTS_FAILED"),
+        "user": ("SATISFIED", "NEEDS_IMPROVEMENT"),
+    }
+
+    if agent_type in positive_to_negative:
+        positive, negative = positive_to_negative[agent_type]
+        if status == positive:
+            if agent_type in ("reviewer", "tester"):
+                print(f"  [EXIT GATE] {agent_type} declared {positive} but listed open issues — overriding to {negative}")
+                verdict["status"] = negative
+            elif agent_type == "user":
+                print(f"  [EXIT GATE] User declared SATISFIED but listed open issues — escalating to human")
+                verdict["escalate"] = True
+
+    return verdict
+
+
+def save_entry(iteration: int, role: str, content: str) -> Path:
+    """Save agent output to iteration-ordered entry structure."""
+    entry_dir = get_workspace_dir() / "entries" / f"iteration-{iteration}"
+    entry_dir.mkdir(parents=True, exist_ok=True)
+    path = entry_dir / f"{role}.md"
+    path.write_text(content)
+    return path
+
+
+_beliefs_available_cache = None
+
+def beliefs_available() -> bool:
+    """Check if the beliefs CLI is installed (cached)."""
+    global _beliefs_available_cache
+    if _beliefs_available_cache is None:
+        try:
+            result = subprocess.run(["beliefs", "--version"], capture_output=True, timeout=5)
+            _beliefs_available_cache = result.returncode == 0
+        except (FileNotFoundError, subprocess.TimeoutExpired):
+            _beliefs_available_cache = False
+    return _beliefs_available_cache
+
+
+def beliefs_enabled() -> bool:
+    """Check if beliefs integration is available."""
+    return beliefs_available()
+
+
+def beliefs_cmd(args: list[str]) -> str | None:
+    """Run a beliefs command in the workspace directory. Returns stdout or None."""
+    if not beliefs_enabled():
+        return None
+    try:
+        result = subprocess.run(
+            ["beliefs"] + args,
+            cwd=get_workspace_dir(), capture_output=True, text=True, timeout=30
+        )
+        if result.returncode == 0:
+            return result.stdout.strip()
+        return None
+    except (FileNotFoundError, subprocess.TimeoutExpired):
+        return None
+
+
+def beliefs_init():
+    """Initialize beliefs.md in the workspace if it doesn't exist."""
+    if not beliefs_enabled():
+        return
+    beliefs_path = get_workspace_dir() / "beliefs.md"
+    if not beliefs_path.exists():
+        beliefs_cmd(["init"])
+
+
+def beliefs_add(claim_id: str, text: str, claim_type: str = "DERIVED", depends_on: str | None = None):
+    """Register a claim in the beliefs system."""
+    if not beliefs_enabled():
+        return
+    args = ["add", "--id", claim_id, "--text", text, "--type", claim_type]
+    if depends_on:
+        args.extend(["--depends-on", depends_on])
+    beliefs_cmd(args)
+
+
+def beliefs_compact(budget: int = 500) -> str | None:
+    """Return a compact summary of current beliefs."""
+    return beliefs_cmd(["compact", "--budget", str(budget)])
+
+
+def beliefs_list_warnings() -> str | None:
+    """List active WARNING claims."""
+    return beliefs_cmd(["list", "--type", "WARNING"])
+
 
 def planner(task: str, user_feedback: str | None = None, shared_understanding: str | None = None,
             iteration: int = 1, continue_conversations: bool = False) -> dict:
@@ -518,20 +682,23 @@ def reviewer(code: str, task: str, iteration: int = 1, continue_conversations: b
     prompt = f"""You are a code reviewer. Review this implementation and provide
 feedback for two audiences.
 
+Your primary job is to FIND ERRORS, not to encourage. If the code has problems,
+say NEEDS_CHANGES. Do not approve code with known issues just because the overall
+structure is acceptable. A single serious bug is grounds for NEEDS_CHANGES.
+
 ORIGINAL TASK: {task}
 
 CODE:
 {code}
 
-Provide your response in THREE parts:
+Provide your response in FOUR parts:
 
 ## FEEDBACK FOR IMPLEMENTER
 
 - Correctness: Does it fulfill the task?
 - Error handling: Are errors clear and actionable?
 - Usability: Can users easily understand failures?
-- Verdict: APPROVED or NEEDS_CHANGES
-- If NEEDS_CHANGES, list specific changes required
+- If changes are needed, list specific changes required
 
 ## FEED-FORWARD FOR TESTER
 
@@ -548,6 +715,20 @@ After reviewing, reflect:
 3. What would make your job easier next time?
 4. What should the implementer know that would help future reviews?
 
+## Verdict
+
+At the END of your response, provide this block EXACTLY:
+
+STATUS: APPROVED
+OPEN_ISSUES: none
+
+or:
+
+STATUS: NEEDS_CHANGES
+OPEN_ISSUES:
+- specific issue 1
+- specific issue 2
+
 If you need clarification or are blocked, escalate to a human:
 QUESTION FOR HUMAN: [your question here]"""
 
@@ -557,9 +738,13 @@ QUESTION FOR HUMAN: [your question here]"""
     save_artifact("REVIEW.md", f"# Code Review\n\n{response}")
     git_commit("[reviewer] Code review complete")
 
+    verdict = parse_verdict(response)
+    verdict = apply_exit_gate(verdict, "reviewer")
+
     return {
         "output": response,
-        "approved": "APPROVED" in response and "NEEDS_CHANGES" not in response
+        "approved": verdict["status"] == "APPROVED",
+        "verdict": verdict
     }
 
 
@@ -586,7 +771,7 @@ CODE:
 REVIEWER'S NOTES FOR TESTING:
 {reviewer_notes}
 
-Provide your response in THREE parts:
+Provide your response in FOUR parts:
 
 ## TEST CASES
 
@@ -604,14 +789,6 @@ Provide your response in THREE parts:
 The User will follow your instructions to actually run the software.
 Make the instructions clear enough for someone (human or AI) to follow.
 
-## TEST VERDICT
-
-After running tests, provide ONE of:
-- TESTS_PASSED: All tests pass, implementation is correct
-- TESTS_FAILED: Tests fail or reveal bugs that need fixing
-
-If TESTS_FAILED, clearly describe what needs to be fixed so the implementer can address it.
-
 ## SELF-REVIEW
 
 After testing and documenting, reflect:
@@ -619,6 +796,22 @@ After testing and documenting, reflect:
 2. What information was missing that would have helped?
 3. What would make your job easier next time?
 4. Any gaps in the implementation that testing revealed?
+
+## Verdict
+
+At the END of your response, provide this block EXACTLY:
+
+STATUS: TESTS_PASSED
+OPEN_ISSUES: none
+
+or:
+
+STATUS: TESTS_FAILED
+OPEN_ISSUES:
+- specific failure 1
+- specific failure 2
+
+If TESTS_FAILED, clearly describe what needs to be fixed so the implementer can address it.
 
 If you need clarification or are blocked, escalate to a human:
 QUESTION FOR HUMAN: [your question here]"""
@@ -648,12 +841,15 @@ QUESTION FOR HUMAN: [your question here]"""
     git_commit("[tester] Tests and usage documentation")
 
     # Determine if tests passed
-    tests_passed = "TESTS_PASSED" in response and "TESTS_FAILED" not in response
+    verdict = parse_verdict(response)
+    verdict = apply_exit_gate(verdict, "tester")
+    tests_passed = verdict["status"] == "TESTS_PASSED"
 
     return {
         "output": response,
         "test_files": test_files,
-        "tests_passed": tests_passed
+        "tests_passed": tests_passed,
+        "verdict": verdict
     }
 
 
@@ -700,12 +896,19 @@ Think about:
 
 Prioritize your requests: P0 (critical), P1 (important), P2 (nice to have)
 
-## OVERALL VERDICT
+## Verdict
 
-- SATISFIED: The software works well enough for the task
-- NEEDS_IMPROVEMENT: Issues need to be addressed before this is usable
+At the END of your response, provide this block EXACTLY:
 
-Explain your verdict.
+STATUS: SATISFIED
+OPEN_ISSUES: none
+
+or:
+
+STATUS: NEEDS_IMPROVEMENT
+OPEN_ISSUES:
+- specific issue 1
+- specific issue 2
 
 The planner will review your feature requests and decide which to implement.
 
@@ -718,9 +921,13 @@ QUESTION FOR HUMAN: [your question here]"""
     save_artifact("USER_FEEDBACK.md", f"# User Feedback\n\n{response}")
     git_commit("[user] User feedback and feature requests")
 
+    verdict = parse_verdict(response)
+    verdict = apply_exit_gate(verdict, "user")
+
     return {
         "output": response,
-        "satisfied": "SATISFIED" in response and "NEEDS_IMPROVEMENT" not in response
+        "satisfied": verdict["status"] == "SATISFIED",
+        "verdict": verdict
     }
 
 
@@ -749,12 +956,21 @@ def run_iteration(task: str, iteration: int, user_feedback: str | None = None,
     - Tester → Implementer (if tests fail)
     """
     results = {}
+    results["unresolved_issues"] = []
 
     # Stage 1: Planning
     print(f"\n[1/5] PLANNER designing solution...")
     plan_result = planner(task, user_feedback, shared_understanding, iteration, continue_conversations)
     results["planner"] = process_agent_output("planner", plan_result["output"], iteration)
+    save_entry(iteration, "planner", results["planner"])
     print(f"\n{results['planner']}\n")
+
+    # Beliefs: register planner decisions as AXIOMs
+    if beliefs_enabled():
+        import re
+        numbered_items = re.findall(r'^\d+\.\s+(.+)$', plan_result.get("output", ""), re.MULTILINE)
+        for i, item in enumerate(numbered_items[:5]):  # cap at 5
+            beliefs_add(f"plan-{iteration}-{i+1}", item[:200], "AXIOM")
 
     # Stage 2 & 3: Implementation + Review loop
     reviewer_feedback = None
@@ -772,14 +988,27 @@ def run_iteration(task: str, iteration: int, user_feedback: str | None = None,
         impl_result = implementer(results["planner"], task, reviewer_feedback, iteration, continue_conversations or inner_iteration > 1)
         results["implementer"] = process_agent_output("implementer", impl_result["output"], iteration)
         results["files_created"] = impl_result.get("files_created", [])
+        save_entry(iteration, "implementer", results["implementer"])
         print(f"\n{results['implementer']}\n")
+
+        # Beliefs: register implemented files as DERIVED claims
+        if beliefs_enabled():
+            for f in results["files_created"]:
+                beliefs_add(f"impl-{iteration}-{f}", f"Created {f}", "DERIVED")
 
         # Review
         print(f"\n[3/5] REVIEWER checking implementation...")
         review_result = reviewer(results["implementer"], task, iteration, continue_conversations or inner_iteration > 1)
         results["reviewer"] = process_agent_output("reviewer", review_result["output"], iteration)
         results["approved"] = review_result["approved"]
+        save_entry(iteration, "reviewer", results["reviewer"])
         print(f"\n{results['reviewer']}\n")
+
+        # Beliefs: register reviewer issues as WARNINGs
+        if beliefs_enabled():
+            for i, issue in enumerate(review_result.get("verdict", {}).get("open_issues", [])):
+                beliefs_add(f"review-warn-{iteration}-{inner_iteration}-{i+1}", issue[:200], "WARNING")
+            beliefs_cmd(["check-refs"])
 
         if review_result["approved"]:
             print(f"  [Reviewer APPROVED - proceeding to tester]")
@@ -787,6 +1016,13 @@ def run_iteration(task: str, iteration: int, user_feedback: str | None = None,
         else:
             print(f"  [Reviewer requested CHANGES - looping back to implementer]")
             reviewer_feedback = results["reviewer"]
+
+    # Track unresolved reviewer issues if inner loop exhausted without approval
+    if not review_result["approved"]:
+        unresolved = review_result.get("verdict", {}).get("open_issues", [])
+        if unresolved:
+            results["unresolved_issues"].extend(unresolved)
+            print(f"  [WARNING] {len(unresolved)} reviewer issues unresolved after {max_inner_iterations} attempts")
 
     # Stage 4: Testing (with potential loop back to implementer)
     tester_iteration = 0
@@ -803,14 +1039,29 @@ def run_iteration(task: str, iteration: int, user_feedback: str | None = None,
             impl_result = implementer(results["planner"], task, tester_feedback, iteration, True)
             results["implementer"] = process_agent_output("implementer", impl_result["output"], iteration)
             results["files_created"] = impl_result.get("files_created", [])
+            save_entry(iteration, "implementer", results["implementer"])
             print(f"\n{results['implementer']}\n")
 
             print(f"\n[4/5] TESTER re-running tests...")
 
-        test_result = tester(results["implementer"], task, results["reviewer"], iteration, continue_conversations or tester_iteration > 1)
+        # Inject unresolved issues into reviewer notes for the tester
+        reviewer_notes_for_tester = results["reviewer"]
+        if results["unresolved_issues"]:
+            reviewer_notes_for_tester += "\n\nWARNING — UNRESOLVED ISSUES FROM PREVIOUS STAGES:\n"
+            reviewer_notes_for_tester += "\n".join(f"- {issue}" for issue in results["unresolved_issues"])
+
+        test_result = tester(results["implementer"], task, reviewer_notes_for_tester, iteration, continue_conversations or tester_iteration > 1)
         results["tester"] = process_agent_output("tester", test_result["output"], iteration)
         results["tests_passed"] = test_result.get("tests_passed", True)
+        save_entry(iteration, "tester", results["tester"])
         print(f"\n{results['tester']}\n")
+
+        # Beliefs: register test results as OBSERVATIONs
+        if beliefs_enabled():
+            status = test_result.get("verdict", {}).get("status", "UNKNOWN")
+            beliefs_add(f"test-{iteration}-{tester_iteration}", f"Tests {status}", "OBSERVATION")
+            for i, issue in enumerate(test_result.get("verdict", {}).get("open_issues", [])):
+                beliefs_add(f"test-warn-{iteration}-{tester_iteration}-{i+1}", issue[:200], "WARNING")
 
         if results["tests_passed"]:
             print(f"  [Tests passed - proceeding to user]")
@@ -819,14 +1070,66 @@ def run_iteration(task: str, iteration: int, user_feedback: str | None = None,
             print(f"  [Tests failed - looping back to implementer]")
             tester_feedback = f"TESTER FEEDBACK (tests failed):\n{results['tester']}"
 
+    # Track unresolved tester issues if inner loop exhausted without passing
+    if not results["tests_passed"]:
+        unresolved = test_result.get("verdict", {}).get("open_issues", [])
+        if unresolved:
+            results["unresolved_issues"].extend(unresolved)
+            print(f"  [WARNING] {len(unresolved)} test issues unresolved after {max_inner_iterations} attempts")
+
     # Stage 5: User feedback
     print(f"\n[5/5] USER trying the code...")
-    user_result = user(results["implementer"], task, results["tester"], iteration, continue_conversations)
+
+    # Inject unresolved issues and beliefs into user context
+    usage_for_user = results["tester"]
+    if results["unresolved_issues"]:
+        usage_for_user += "\n\nWARNING — UNRESOLVED ISSUES FROM PREVIOUS STAGES:\n"
+        usage_for_user += "\n".join(f"- {issue}" for issue in results["unresolved_issues"])
+
+    # Inject beliefs compact summary if available
+    beliefs_summary = beliefs_compact(500)
+    if beliefs_summary:
+        usage_for_user += f"\n\nBELIEFS STATE:\n{beliefs_summary}"
+
+    # Check for active warnings from beliefs
+    beliefs_warnings = beliefs_list_warnings()
+
+    user_result = user(results["implementer"], task, usage_for_user, iteration, continue_conversations)
     results["user"] = process_agent_output("user", user_result["output"], iteration)
     results["user_satisfied"] = user_result["satisfied"]
+    save_entry(iteration, "user", results["user"])
     print(f"\n{results['user']}\n")
 
+    # Exit gate: handle user escalation (SATISFIED + open issues)
+    if user_result.get("verdict", {}).get("escalate"):
+        open_issues = user_result["verdict"].get("open_issues", [])
+        issue_list = "\n".join(f"- {i}" for i in open_issues)
+        human_response = request_human_input(
+            "user",
+            {"needs_human": True, "message": f"User declared SATISFIED but listed open issues:\n{issue_list}\n\nAccept or reject?"},
+            iteration
+        )
+        if human_response and "reject" in human_response.lower():
+            results["user_satisfied"] = False
+
+    # Exit gate: SATISFIED + active beliefs WARNINGs
+    if results["user_satisfied"] and beliefs_warnings:
+        print(f"  [EXIT GATE] User SATISFIED but beliefs system has active WARNINGs — escalating to human")
+        human_response = request_human_input(
+            "user",
+            {"needs_human": True, "message": f"User declared SATISFIED but beliefs system has active WARNINGs:\n{beliefs_warnings}\n\nAccept or reject?"},
+            iteration
+        )
+        if human_response and "reject" in human_response.lower():
+            results["user_satisfied"] = False
+
     # Create iteration understanding document - what we learned this iteration
+    unresolved_section = ""
+    if results["unresolved_issues"]:
+        unresolved_section = "\n### Unresolved Issues\n\n"
+        unresolved_section += "\n".join(f"- {issue}" for issue in results["unresolved_issues"])
+        unresolved_section += "\n"
+
     iteration_understanding = f"""# Iteration {iteration} Understanding
 
 ## What We Learned
@@ -849,12 +1152,13 @@ Verdict: {'APPROVED' if results['approved'] else 'NEEDS_CHANGES'}
 Verdict: {'SATISFIED' if results['user_satisfied'] else 'NEEDS_IMPROVEMENT'}
 
 {results.get('user', '')[-1500:]}
-
+{unresolved_section}
 ## Summary
 
 - Planner confidence: {plan_result.get('confidence', 'N/A')}
 - Reviewer verdict: {'APPROVED' if results['approved'] else 'NEEDS_CHANGES'}
 - User verdict: {'SATISFIED' if results['user_satisfied'] else 'NEEDS_IMPROVEMENT'}
+- Unresolved issues: {len(results['unresolved_issues'])}
 """
     save_artifact(f"ITERATION_{iteration}_UNDERSTANDING.md", iteration_understanding)
 
@@ -1033,6 +1337,9 @@ def run_pipeline(task: str, max_iterations: int = 3, understanding_path: str | N
 
     # Initialize workspace with git
     init_workspace()
+
+    # Initialize beliefs system if available
+    beliefs_init()
 
     # Load shared understanding if provided
     shared_understanding = None
