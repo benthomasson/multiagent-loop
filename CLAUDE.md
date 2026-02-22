@@ -130,21 +130,21 @@ Agents can request human input with markers like `QUESTION FOR HUMAN:`. Supervis
 
 Each agent's full output is saved to `entries/iteration-{N}/{role}.md` in the workspace. This provides an immutable audit trail without the truncation of `ITERATION_N_UNDERSTANDING.md`. Inner loop re-runs overwrite the same entry file (captures final state per role per iteration).
 
-### Beliefs Integration (Optional)
+### Beliefs Integration
 
-If the `beliefs` CLI is installed, the supervisor registers claims after each stage:
+The supervisor uses [beliefs](https://github.com/benthomasson/beliefs) as a library (`beliefs_lib`) to track claims across pipeline stages:
 - **Planner** decisions → `AXIOM` claims
 - **Implementer** files → `DERIVED` claims
 - **Reviewer** issues → `WARNING` claims
 - **Tester** results → `OBSERVATION` claims
 
-Before the user stage, `beliefs compact` is injected into context. The exit gate also checks: if the user is SATISFIED but active WARNINGs exist, it escalates to a human. All beliefs operations silently no-op if the CLI isn't installed.
+Before the user stage, `beliefs compact` is injected into context. The exit gate also checks: if the user is SATISFIED but active WARNINGs exist, it escalates to a human.
 
 ## Runtime Directories (gitignored)
 
 - `workspaces/{name}/` - Named workspaces, each a git repo with artifacts and agent subdirectories
   - `entries/iteration-{N}/` - Full agent outputs per iteration (planner.md, implementer.md, etc.)
-  - `beliefs.md` / `nogoods.md` - Beliefs system state (if `beliefs` CLI available)
+  - `beliefs.md` / `nogoods.md` - Beliefs system state
 - `agents/{name}/` - Session directories per workspace for conversation isolation
 - `pids/` - PID files for running agent processes
 - `multiagent.log` - Verbose logging output

@@ -323,8 +323,8 @@ multiagent-loop/
 │       │       ├── reviewer.md
 │       │       ├── tester.md
 │       │       └── user.md
-│       ├── beliefs.md # Belief registry (if beliefs CLI installed)
-│       ├── nogoods.md # Contradiction database (if beliefs CLI installed)
+│       ├── beliefs.md # Belief registry
+│       ├── nogoods.md # Contradiction database
 │       └── *.py       # Generated code files
 ├── pids/              # PID files for running agents
 │   └── {role}.pid     # Contains PID of running agent process
@@ -349,9 +349,9 @@ multiagent-loop/
 
 7. **Convergence**: Loop ends when User is SATISFIED or max iterations reached.
 
-## Beliefs Integration (Optional)
+## Beliefs Integration
 
-The pipeline optionally integrates with [beliefs](https://github.com/benthomasson/beliefs), a CLI tool for tracking claims and contradictions across multi-agent systems.
+The pipeline integrates [beliefs](https://github.com/benthomasson/beliefs) as a library for tracking claims and contradictions across multi-agent systems.
 
 ### The Problem It Solves
 
@@ -370,16 +370,7 @@ When the `beliefs` CLI is installed, the supervisor registers claims at each pip
 
 Before the User stage, `beliefs compact` produces a structured summary of the current belief state — replacing raw prose accumulation with a queryable snapshot. The exit gate then checks: if the User declares SATISFIED but the beliefs system has active WARNINGs, it escalates to a human rather than terminating the loop.
 
-### Graceful Degradation
-
-All beliefs operations check `beliefs_enabled()` first. If the CLI isn't installed, everything silently no-ops. The pipeline works identically without it — structured verdicts and exit gates function independently.
-
-### Installation
-
-```bash
-# Install beliefs CLI (optional)
-pip install git+https://github.com/benthomasson/beliefs.git
-```
+The `beliefs` library is a required dependency — it's declared in supervisor.py's inline script metadata and installed automatically by `uv run`.
 
 ## Artifacts Generated
 
@@ -397,7 +388,7 @@ pip install git+https://github.com/benthomasson/beliefs.git
 | `test_*.py` | Tester | Test files |
 | `USER_FEEDBACK.md` | User | Usage report and feature requests |
 | `entries/iteration-N/*.md` | Supervisor | Full agent outputs per iteration (audit trail) |
-| `beliefs.md` | Supervisor | Belief registry (optional, requires `beliefs` CLI) |
+| `beliefs.md` | Supervisor | Belief registry for claim tracking |
 | `ITERATION_N_SUMMARY.md` | Supervisor | Per-iteration summary |
 | `FINAL_SUMMARY.md` | Supervisor | Final status and history |
 
@@ -405,4 +396,4 @@ pip install git+https://github.com/benthomasson/beliefs.git
 
 - [uv](https://github.com/astral-sh/uv) - Python package manager
 - [Claude CLI](https://claude.ai/code) - `claude` command available in PATH
-- [beliefs](https://github.com/benthomasson/beliefs) - (Optional) Claim tracking for contradiction detection
+- [beliefs](https://github.com/benthomasson/beliefs) - Claim tracking for contradiction detection (installed automatically by `uv run`)

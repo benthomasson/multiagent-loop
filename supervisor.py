@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run
 # /// script
 # requires-python = ">=3.10"
-# dependencies = []
+# dependencies = ["beliefs @ git+https://github.com/benthomasson/beliefs.git"]
 # ///
 
 """
@@ -433,68 +433,79 @@ def save_entry(iteration: int, role: str, content: str) -> Path:
     return path
 
 
-_beliefs_available_cache = None
-
-def beliefs_available() -> bool:
-    """Check if the beliefs CLI is installed (cached)."""
-    global _beliefs_available_cache
-    if _beliefs_available_cache is None:
-        try:
-            result = subprocess.run(["beliefs", "--help"], capture_output=True, timeout=5)
-            _beliefs_available_cache = result.returncode == 0
-        except (FileNotFoundError, subprocess.TimeoutExpired):
-            _beliefs_available_cache = False
-    return _beliefs_available_cache
+from beliefs_lib import Claim
+from beliefs_lib.parser import parse_registry, append_claim, parse_nogoods
+from beliefs_lib.compact import compact as _beliefs_compact
+from beliefs_lib.check_refs import check_refs as _beliefs_check_refs
 
 
-def beliefs_enabled() -> bool:
-    """Check if beliefs integration is available."""
-    return beliefs_available()
+def _beliefs_registry_path() -> Path:
+    return get_workspace_dir() / "beliefs.md"
 
 
-def beliefs_cmd(args: list[str]) -> str | None:
-    """Run a beliefs command in the workspace directory. Returns stdout or None."""
-    if not beliefs_enabled():
-        return None
-    try:
-        result = subprocess.run(
-            ["beliefs"] + args,
-            cwd=get_workspace_dir(), capture_output=True, text=True, timeout=30
-        )
-        if result.returncode == 0:
-            return result.stdout.strip()
-        return None
-    except (FileNotFoundError, subprocess.TimeoutExpired):
-        return None
+def _beliefs_nogoods_path() -> Path:
+    return get_workspace_dir() / "nogoods.md"
 
 
 def beliefs_init():
-    """Initialize beliefs.md in the workspace if it doesn't exist."""
-    if not beliefs_enabled():
-        return
-    beliefs_path = get_workspace_dir() / "beliefs.md"
-    if not beliefs_path.exists():
-        beliefs_cmd(["init"])
+    """Initialize beliefs.md and nogoods.md in the workspace if they don't exist."""
+    registry = _beliefs_registry_path()
+    nogoods = _beliefs_nogoods_path()
+    if not registry.exists():
+        registry.write_text("# Beliefs Registry\n\n## Repos\n\n")
+    if not nogoods.exists():
+        nogoods.write_text("# Nogoods\n\n")
 
 
 def beliefs_add(claim_id: str, text: str, claim_type: str = "DERIVED", depends_on: str | None = None):
     """Register a claim in the beliefs system."""
-    if not beliefs_enabled():
+    registry = _beliefs_registry_path()
+    if not registry.exists():
         return
-    args = ["add", "--id", claim_id, "--text", text, "--type", claim_type]
-    if depends_on:
-        args.extend(["--depends-on", depends_on])
-    beliefs_cmd(args)
+    claim = Claim(
+        id=claim_id,
+        text=text,
+        type=claim_type,
+        status="IN",
+        date=datetime.now().strftime("%Y-%m-%d"),
+        depends_on=[depends_on] if depends_on else [],
+    )
+    append_claim(registry, claim)
 
 
 def beliefs_compact(budget: int = 500) -> str | None:
     """Return a compact summary of current beliefs."""
-    return beliefs_cmd(["compact", "--budget", str(budget)])
+    registry = _beliefs_registry_path()
+    if not registry.exists():
+        return None
+    repos, claims = parse_registry(registry)
+    nogoods = parse_nogoods(_beliefs_nogoods_path()) if _beliefs_nogoods_path().exists() else []
+    result = _beliefs_compact(claims, nogoods, budget=budget)
+    return result if result.strip() else None
+
+
+def beliefs_check_refs():
+    """Check cross-references for all claims."""
+    registry = _beliefs_registry_path()
+    if not registry.exists():
+        return
+    repos, claims = parse_registry(registry)
+    results = _beliefs_check_refs(claims, repos)
+    for claim_id, status, message in results:
+        if status != "OK":
+            print(f"  [beliefs] {claim_id}: {status} — {message}")
 
 
 def beliefs_list_warnings() -> str | None:
     """List active WARNING claims."""
-    return beliefs_cmd(["list", "--type", "WARNING"])
+    registry = _beliefs_registry_path()
+    if not registry.exists():
+        return None
+    repos, claims = parse_registry(registry)
+    warnings = [c for c in claims if c.type == "WARNING" and c.status == "IN"]
+    if not warnings:
+        return None
+    return "\n".join(f"- [{c.id}] {c.text}" for c in warnings)
 
 
 def planner(task: str, user_feedback: str | None = None, shared_understanding: str | None = None,
@@ -968,7 +979,7 @@ def run_iteration(task: str, iteration: int, user_feedback: str | None = None,
     print(f"\n{results['planner']}\n")
 
     # Beliefs: register planner decisions as AXIOMs
-    if beliefs_enabled():
+    if _beliefs_registry_path().exists():
         import re
         numbered_items = re.findall(r'^\d+\.\s+(.+)$', plan_result.get("output", ""), re.MULTILINE)
         for i, item in enumerate(numbered_items[:5]):  # cap at 5
@@ -994,7 +1005,7 @@ def run_iteration(task: str, iteration: int, user_feedback: str | None = None,
         print(f"\n{results['implementer']}\n")
 
         # Beliefs: register implemented files as DERIVED claims
-        if beliefs_enabled():
+        if _beliefs_registry_path().exists():
             for f in results["files_created"]:
                 beliefs_add(f"impl-{iteration}-{f}", f"Created {f}", "DERIVED")
 
@@ -1007,10 +1018,10 @@ def run_iteration(task: str, iteration: int, user_feedback: str | None = None,
         print(f"\n{results['reviewer']}\n")
 
         # Beliefs: register reviewer issues as WARNINGs
-        if beliefs_enabled():
+        if _beliefs_registry_path().exists():
             for i, issue in enumerate(review_result.get("verdict", {}).get("open_issues", [])):
                 beliefs_add(f"review-warn-{iteration}-{inner_iteration}-{i+1}", issue[:200], "WARNING")
-            beliefs_cmd(["check-refs"])
+            beliefs_check_refs()
 
         if review_result["approved"]:
             print(f"  [Reviewer APPROVED - proceeding to tester]")
@@ -1059,7 +1070,7 @@ def run_iteration(task: str, iteration: int, user_feedback: str | None = None,
         print(f"\n{results['tester']}\n")
 
         # Beliefs: register test results as OBSERVATIONs
-        if beliefs_enabled():
+        if _beliefs_registry_path().exists():
             status = test_result.get("verdict", {}).get("status", "UNKNOWN")
             beliefs_add(f"test-{iteration}-{tester_iteration}", f"Tests {status}", "OBSERVATION")
             for i, issue in enumerate(test_result.get("verdict", {}).get("open_issues", [])):
