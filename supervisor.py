@@ -355,10 +355,11 @@ def parse_verdict(response: str) -> dict:
     result = {"status": None, "open_issues": []}
 
     # Try structured format first
+    # Terminators: blank line, next heading, or end-of-string
     verdict_match = re.search(
         r'## Verdict\s*\n'
         r'STATUS:\s*(\S+)\s*\n'
-        r'(?:OPEN_ISSUES:\s*(.*?))?(?=\n## |\Z)',
+        r'(?:OPEN_ISSUES:\s*(.*?))?(?=\n\n|\n## |\Z)',
         response, re.DOTALL
     )
 
@@ -368,10 +369,11 @@ def parse_verdict(response: str) -> dict:
         if issues_text:
             issues_text = issues_text.strip()
             if issues_text.lower() != "none" and issues_text:
+                # Only accept lines starting with "- " as issues
                 result["open_issues"] = [
                     line.strip().lstrip("- ").strip()
                     for line in issues_text.split('\n')
-                    if line.strip() and line.strip() != "-"
+                    if line.strip().startswith("-")
                 ]
         return result
 
