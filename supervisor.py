@@ -440,7 +440,7 @@ def beliefs_available() -> bool:
     global _beliefs_available_cache
     if _beliefs_available_cache is None:
         try:
-            result = subprocess.run(["beliefs", "--version"], capture_output=True, timeout=5)
+            result = subprocess.run(["beliefs", "--help"], capture_output=True, timeout=5)
             _beliefs_available_cache = result.returncode == 0
         except (FileNotFoundError, subprocess.TimeoutExpired):
             _beliefs_available_cache = False
