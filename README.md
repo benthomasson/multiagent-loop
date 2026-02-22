@@ -316,6 +316,15 @@ multiagent-loop/
 │       ├── USER_FEEDBACK.md
 │       ├── ITERATION_*_SUMMARY.md
 │       ├── FINAL_SUMMARY.md
+│       ├── entries/   # Full agent outputs per iteration
+│       │   └── iteration-{N}/
+│       │       ├── planner.md
+│       │       ├── implementer.md
+│       │       ├── reviewer.md
+│       │       ├── tester.md
+│       │       └── user.md
+│       ├── beliefs.md # Belief registry (if beliefs CLI installed)
+│       ├── nogoods.md # Contradiction database (if beliefs CLI installed)
 │       └── *.py       # Generated code files
 ├── pids/              # PID files for running agents
 │   └── {role}.pid     # Contains PID of running agent process
@@ -336,7 +345,41 @@ multiagent-loop/
 
 5. **Outer Feedback Loop**: User feedback triggers new iterations. The Planner reviews feature requests and decides which to implement.
 
-6. **Convergence**: Loop ends when User is SATISFIED or max iterations reached.
+6. **Structured Verdicts & Exit Gates**: Agents emit machine-parseable verdict blocks (`STATUS:` + `OPEN_ISSUES:`) instead of prose. An exit gate catches contradictions — if an agent declares APPROVED but lists open issues, the supervisor overrides the verdict or escalates to a human. This prevents cascading belief failures where bugs propagate through the pipeline because a positive keyword appeared in otherwise-negative feedback.
+
+7. **Convergence**: Loop ends when User is SATISFIED or max iterations reached.
+
+## Beliefs Integration (Optional)
+
+The pipeline optionally integrates with [beliefs](https://github.com/benthomasson/beliefs), a CLI tool for tracking claims and contradictions across multi-agent systems.
+
+### The Problem It Solves
+
+In early test runs, the User agent declared SATISFIED despite documented bugs — the string-matching verdict parser couldn't distinguish "satisfied despite issues" from "satisfied, no issues." Bugs propagated through the pipeline unchallenged because each agent trusted the previous agent's positive verdict without checking the evidence. This is a *cascading belief failure*: one wrong claim ("code is correct") becomes an unquestioned assumption for every downstream agent.
+
+### How It Works
+
+When the `beliefs` CLI is installed, the supervisor registers claims at each pipeline stage:
+
+| After stage | Claim type | Example |
+|-------------|------------|---------|
+| Planner | `AXIOM` | "Implementation should use recursive approach" |
+| Implementer | `DERIVED` | "Created is_prime.py" |
+| Reviewer | `WARNING` | "is_prime(4.9) returns True" |
+| Tester | `OBSERVATION` | "Tests PASSED" |
+
+Before the User stage, `beliefs compact` produces a structured summary of the current belief state — replacing raw prose accumulation with a queryable snapshot. The exit gate then checks: if the User declares SATISFIED but the beliefs system has active WARNINGs, it escalates to a human rather than terminating the loop.
+
+### Graceful Degradation
+
+All beliefs operations check `beliefs_enabled()` first. If the CLI isn't installed, everything silently no-ops. The pipeline works identically without it — structured verdicts and exit gates function independently.
+
+### Installation
+
+```bash
+# Install beliefs CLI (optional)
+pip install git+https://github.com/benthomasson/beliefs.git
+```
 
 ## Artifacts Generated
 
@@ -353,6 +396,8 @@ multiagent-loop/
 | `USAGE.md` | Tester | Usage instructions for the User |
 | `test_*.py` | Tester | Test files |
 | `USER_FEEDBACK.md` | User | Usage report and feature requests |
+| `entries/iteration-N/*.md` | Supervisor | Full agent outputs per iteration (audit trail) |
+| `beliefs.md` | Supervisor | Belief registry (optional, requires `beliefs` CLI) |
 | `ITERATION_N_SUMMARY.md` | Supervisor | Per-iteration summary |
 | `FINAL_SUMMARY.md` | Supervisor | Final status and history |
 
@@ -360,3 +405,4 @@ multiagent-loop/
 
 - [uv](https://github.com/astral-sh/uv) - Python package manager
 - [Claude CLI](https://claude.ai/code) - `claude` command available in PATH
+- [beliefs](https://github.com/benthomasson/beliefs) - (Optional) Claim tracking for contradiction detection
