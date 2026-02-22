@@ -330,9 +330,13 @@ multiagent-loop/
 
 3. **Self-Review**: Each agent reflects on their work, surfacing friction points and improvement ideas.
 
-4. **Feedback Loop**: User feedback triggers new iterations. The Planner reviews feature requests and decides which to implement.
+4. **Inner Loops**: Before reaching the User, two inner feedback loops catch problems early (up to 3 attempts each):
+   - **Reviewer → Implementer**: If the reviewer returns `NEEDS_CHANGES`, the implementer fixes issues before testing begins.
+   - **Tester → Implementer**: If tests fail (`TESTS_FAILED`), the implementer fixes bugs before the user tries the code.
 
-5. **Convergence**: Loop ends when User is SATISFIED or max iterations reached.
+5. **Outer Feedback Loop**: User feedback triggers new iterations. The Planner reviews feature requests and decides which to implement.
+
+6. **Convergence**: Loop ends when User is SATISFIED or max iterations reached.
 
 ## Artifacts Generated
 
