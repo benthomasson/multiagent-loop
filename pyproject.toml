@@ -6,7 +6,7 @@ readme = "README.md"
 requires-python = ">=3.11"
 license = {text = "MIT"}
 authors = [
-    {name = "Ben Thomasson", email = "ben@thomasson.io"}
+    {name = "Ben Thomasson", email = "ben.thomasson@gmail.com"}
 ]
 keywords = ["ai", "agents", "development", "automation", "claude"]
 classifiers = [
