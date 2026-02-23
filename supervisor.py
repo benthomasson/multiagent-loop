@@ -43,6 +43,45 @@ import time
 # Queue file handling for continuous mode
 DEFAULT_QUEUE_PATH = Path("queue.txt")
 
+# Effort level configurations
+EFFORT_CONFIGS = {
+    'minimal': {
+        'description': 'Fast execution (~5-15 min) - working solution with basic tests',
+        'agents': ['planner', 'implementer', 'tester'],
+        'max_iterations': 1,
+        'skip_review': True,
+        'skip_user': True,
+        'max_inner_iterations': 1,  # No feedback loops
+        'prompts': {
+            'planner': '\n\nIMPORTANT - EFFORT LEVEL: MINIMAL\nKeep plan VERY brief (2-3 paragraphs max). Focus only on algorithm choice. Skip architectural discussions and detailed analysis.',
+            'implementer': '\n\nIMPORTANT - EFFORT LEVEL: MINIMAL\nCreate a minimal working solution:\n- Basic function with minimal docstring (1-2 lines + Args/Returns)\n- Type hints optional\n- No input validation beyond what\'s strictly necessary\n- ONE solution file only (no README, no verify.py, no extra files)\n- Keep it simple and working',
+            'tester': '\n\nIMPORTANT - EFFORT LEVEL: MINIMAL\nCreate 5-10 test cases maximum covering:\n- Examples from problem\n- Basic edge cases only\n- Skip usage guide, skip documentation\n- Just verify tests pass and you\'re done'
+        }
+    },
+    'moderate': {
+        'description': 'Balanced approach (~30-60 min) - solid code with good practices',
+        'agents': ['planner', 'implementer', 'reviewer', 'tester'],
+        'max_iterations': 1,
+        'skip_user': True,
+        'max_inner_iterations': 2,  # Limited feedback
+        'prompts': {
+            'planner': '\n\nEFFORT LEVEL: MODERATE\nKeep plan focused and concise. Cover key design decisions but avoid over-analysis.',
+            'implementer': '\n\nEFFORT LEVEL: MODERATE\nCreate a clean solution:\n- Good docstring with examples\n- Type hints required\n- Basic input validation\n- One main solution file\n- Keep it professional but not over-engineered',
+            'reviewer': '\n\nEFFORT LEVEL: MODERATE\nFocus on correctness and obvious bugs. Max 1-2 rounds of fixes. Be pragmatic.',
+            'tester': '\n\nEFFORT LEVEL: MODERATE\nCreate 10-20 test cases with brief usage guide. Cover main scenarios and edge cases.'
+        }
+    },
+    'maximum': {
+        'description': 'Production quality (~2-3 hours) - comprehensive testing and documentation',
+        'agents': ['planner', 'implementer', 'reviewer', 'tester', 'user'],
+        'max_iterations': 2,
+        'skip_review': False,
+        'skip_user': False,
+        'max_inner_iterations': 3,  # Full feedback loops
+        'prompts': {}  # No special instructions - full thoroughness
+    }
+}
+
 def read_queue(queue_path: Path) -> list[str]:
     """Read all tasks from the queue file. Returns empty list if file doesn't exist."""
     if not queue_path.exists():
@@ -967,19 +1006,28 @@ def process_agent_output(agent_name: str, output: str, iteration: int) -> str:
 def run_iteration(task: str, iteration: int, user_feedback: str | None = None,
                   shared_understanding: str | None = None,
                   continue_conversations: bool = False,
-                  max_inner_iterations: int = 3) -> dict:
+                  max_inner_iterations: int = 3,
+                  effort_config: dict | None = None) -> dict:
     """Run one iteration of the development loop.
 
     Inner loops:
     - Reviewer → Implementer (if NEEDS_CHANGES)
     - Tester → Implementer (if tests fail)
     """
+    if effort_config is None:
+        effort_config = EFFORT_CONFIGS['moderate']
+
     results = {}
     results["unresolved_issues"] = []
+    skip_review = effort_config.get('skip_review', False)
+    skip_user = effort_config.get('skip_user', False)
+
+    # Add effort-specific instructions to task
+    task_with_effort = task + effort_config.get('prompts', {}).get('planner', '')
 
     # Stage 1: Planning
     print(f"\n[1/5] PLANNER designing solution...")
-    plan_result = planner(task, user_feedback, shared_understanding, iteration, continue_conversations)
+    plan_result = planner(task_with_effort, user_feedback, shared_understanding, iteration, continue_conversations)
     results["planner"] = process_agent_output("planner", plan_result["output"], iteration)
     save_entry(iteration, "planner", results["planner"])
     print(f"\n{results['planner']}\n")
@@ -1004,7 +1052,9 @@ def run_iteration(task: str, iteration: int, user_feedback: str | None = None,
         else:
             print(f"\n[2/5] IMPLEMENTER fixing issues (attempt {inner_iteration})...")
 
-        impl_result = implementer(results["planner"], task, reviewer_feedback, iteration, continue_conversations or inner_iteration > 1)
+        # Add effort-specific instructions to task for implementer
+        task_for_impl = task + effort_config.get('prompts', {}).get('implementer', '')
+        impl_result = implementer(results["planner"], task_for_impl, reviewer_feedback, iteration, continue_conversations or inner_iteration > 1)
         results["implementer"] = process_agent_output("implementer", impl_result["output"], iteration)
         results["files_created"] = impl_result.get("files_created", [])
         save_entry(iteration, "implementer", results["implementer"])
@@ -1015,13 +1065,20 @@ def run_iteration(task: str, iteration: int, user_feedback: str | None = None,
             for f in results["files_created"]:
                 beliefs_add(f"impl-{iteration}-{f}", f"Created {f}", "DERIVED")
 
-        # Review
-        print(f"\n[3/5] REVIEWER checking implementation...")
-        review_result = reviewer(results["implementer"], task, iteration, continue_conversations or inner_iteration > 1)
-        results["reviewer"] = process_agent_output("reviewer", review_result["output"], iteration)
-        results["approved"] = review_result["approved"]
-        save_entry(iteration, "reviewer", results["reviewer"])
-        print(f"\n{results['reviewer']}\n")
+        # Review (skip if effort level is minimal)
+        if skip_review:
+            print(f"\n[3/5] REVIEWER skipped (effort level: minimal)")
+            results["reviewer"] = "Skipped - minimal effort level"
+            results["approved"] = True  # Auto-approve
+            review_result = {"approved": True, "output": results["reviewer"], "verdict": {"status": "APPROVED", "open_issues": []}}
+        else:
+            print(f"\n[3/5] REVIEWER checking implementation...")
+            task_for_reviewer = task + effort_config.get('prompts', {}).get('reviewer', '')
+            review_result = reviewer(results["implementer"], task_for_reviewer, iteration, continue_conversations or inner_iteration > 1)
+            results["reviewer"] = process_agent_output("reviewer", review_result["output"], iteration)
+            results["approved"] = review_result["approved"]
+            save_entry(iteration, "reviewer", results["reviewer"])
+            print(f"\n{results['reviewer']}\n")
 
         # Beliefs: register reviewer issues as WARNINGs
         if _beliefs_registry_path().exists():
@@ -1069,7 +1126,9 @@ def run_iteration(task: str, iteration: int, user_feedback: str | None = None,
             reviewer_notes_for_tester += "\n\nWARNING — UNRESOLVED ISSUES FROM PREVIOUS STAGES:\n"
             reviewer_notes_for_tester += "\n".join(f"- {issue}" for issue in results["unresolved_issues"])
 
-        test_result = tester(results["implementer"], task, reviewer_notes_for_tester, iteration, continue_conversations or tester_iteration > 1)
+        # Add effort-specific instructions to task for tester
+        task_for_tester = task + effort_config.get('prompts', {}).get('tester', '')
+        test_result = tester(results["implementer"], task_for_tester, reviewer_notes_for_tester, iteration, continue_conversations or tester_iteration > 1)
         results["tester"] = process_agent_output("tester", test_result["output"], iteration)
         results["tests_passed"] = test_result.get("tests_passed", True)
         save_entry(iteration, "tester", results["tester"])
@@ -1096,28 +1155,35 @@ def run_iteration(task: str, iteration: int, user_feedback: str | None = None,
             results["unresolved_issues"].extend(unresolved)
             print(f"  [WARNING] {len(unresolved)} test issues unresolved after {max_inner_iterations} attempts")
 
-    # Stage 5: User feedback
-    print(f"\n[5/5] USER trying the code...")
+    # Stage 5: User feedback (skip if effort level is minimal or moderate)
+    if skip_user:
+        print(f"\n[5/5] USER skipped (effort level does not include user testing)")
+        results["user"] = "Skipped - effort level does not include user testing"
+        results["user_satisfied"] = True  # Auto-satisfy
+        user_result = {"satisfied": True, "output": results["user"], "verdict": {"status": "SATISFIED", "open_issues": []}}
+        save_entry(iteration, "user", results["user"])
+    else:
+        print(f"\n[5/5] USER trying the code...")
 
-    # Inject unresolved issues and beliefs into user context
-    usage_for_user = results["tester"]
-    if results["unresolved_issues"]:
-        usage_for_user += "\n\nWARNING — UNRESOLVED ISSUES FROM PREVIOUS STAGES:\n"
-        usage_for_user += "\n".join(f"- {issue}" for issue in results["unresolved_issues"])
+        # Inject unresolved issues and beliefs into user context
+        usage_for_user = results["tester"]
+        if results["unresolved_issues"]:
+            usage_for_user += "\n\nWARNING — UNRESOLVED ISSUES FROM PREVIOUS STAGES:\n"
+            usage_for_user += "\n".join(f"- {issue}" for issue in results["unresolved_issues"])
 
-    # Inject beliefs compact summary if available
-    beliefs_summary = beliefs_compact(500)
-    if beliefs_summary:
-        usage_for_user += f"\n\nBELIEFS STATE:\n{beliefs_summary}"
+        # Inject beliefs compact summary if available
+        beliefs_summary = beliefs_compact(500)
+        if beliefs_summary:
+            usage_for_user += f"\n\nBELIEFS STATE:\n{beliefs_summary}"
 
-    # Check for active warnings from beliefs
-    beliefs_warnings = beliefs_list_warnings()
+        # Check for active warnings from beliefs
+        beliefs_warnings = beliefs_list_warnings()
 
-    user_result = user(results["implementer"], task, usage_for_user, iteration, continue_conversations)
-    results["user"] = process_agent_output("user", user_result["output"], iteration)
-    results["user_satisfied"] = user_result["satisfied"]
-    save_entry(iteration, "user", results["user"])
-    print(f"\n{results['user']}\n")
+        user_result = user(results["implementer"], task, usage_for_user, iteration, continue_conversations)
+        results["user"] = process_agent_output("user", user_result["output"], iteration)
+        results["user_satisfied"] = user_result["satisfied"]
+        save_entry(iteration, "user", results["user"])
+        print(f"\n{results['user']}\n")
 
     # Exit gate: handle user escalation (SATISFIED + open issues)
     if user_result.get("verdict", {}).get("escalate"):
@@ -1343,12 +1409,20 @@ def request_human_input(agent_name: str, escalation: dict, iteration: int) -> st
 
 
 def run_pipeline(task: str, max_iterations: int = 3, understanding_path: str | None = None,
-                 continue_conversations: bool = False) -> dict:
+                 continue_conversations: bool = False, effort: str = 'moderate') -> dict:
     """Run the development loop with feedback iterations."""
+
+    # Get effort configuration
+    effort_config = EFFORT_CONFIGS.get(effort, EFFORT_CONFIGS['moderate'])
+
+    # Override max_iterations from effort level if not explicitly set
+    if max_iterations == 3:  # default value
+        max_iterations = effort_config['max_iterations']
 
     # Start new log session
     log_separator(f"PIPELINE: {task[:50]}")
     log(f"Task: {task}")
+    log(f"Effort level: {effort}")
     log(f"Max iterations: {max_iterations}")
     log(f"Continue conversations: {continue_conversations}")
     log(f"Understanding path: {understanding_path}")
@@ -1375,6 +1449,7 @@ def run_pipeline(task: str, max_iterations: int = 3, understanding_path: str | N
     print("=" * 60)
     print("SUPERVISOR: Starting development loop")
     print(f"TASK: {task}")
+    print(f"EFFORT LEVEL: {effort} - {effort_config['description']}")
     print(f"MAX ITERATIONS: {max_iterations}")
     print(f"get_workspace_dir(): {get_workspace_dir()}")
     print("=" * 60)
@@ -1392,7 +1467,9 @@ def run_pipeline(task: str, max_iterations: int = 3, understanding_path: str | N
         print(f"ITERATION {iteration} of {max_iterations}")
         print("=" * 60)
 
-        results = run_iteration(task, iteration, user_feedback, shared_understanding, continue_conversations)
+        results = run_iteration(task, iteration, user_feedback, shared_understanding, continue_conversations,
+                               max_inner_iterations=effort_config['max_inner_iterations'],
+                               effort_config=effort_config)
         all_results.append(results)
 
         if results["user_satisfied"]:
@@ -1511,7 +1588,8 @@ To continue: `uv run supervisor.py --understanding workspace/ "task" --max-itera
 
 def run_continuous(queue_path: Path, max_iterations: int = 3,
                    understanding_path: str | None = None,
-                   continue_conversations: bool = False) -> None:
+                   continue_conversations: bool = False,
+                   effort: str = 'moderate') -> None:
     """Run the pipeline continuously, processing tasks from a queue file.
 
     Loops forever until interrupted with Ctrl+C. When the queue is empty,
@@ -1520,6 +1598,7 @@ def run_continuous(queue_path: Path, max_iterations: int = 3,
     print("=" * 60)
     print("SUPERVISOR: Starting continuous mode")
     print(f"Queue file: {queue_path}")
+    print(f"Effort level: {effort}")
     print(f"Max iterations per task: {max_iterations}")
     print("Press Ctrl+C to stop")
     print("=" * 60)
@@ -1544,7 +1623,8 @@ def run_continuous(queue_path: Path, max_iterations: int = 3,
                         task=task,
                         max_iterations=max_iterations,
                         understanding_path=understanding_path,
-                        continue_conversations=continue_conversations
+                        continue_conversations=continue_conversations,
+                        effort=effort
                     )
 
                     status = "SATISFIED" if result["final_satisfied"] else "INCOMPLETE"
@@ -1578,7 +1658,8 @@ if __name__ == "__main__":
         print(f"\nOptions:")
         print(f"  -h, --help            Show this help message and exit")
         print(f"  --workspace NAME      Named workspace (default: 'default')")
-        print(f"  --max-iterations N    Maximum development iterations (default: 3)")
+        print(f"  --effort LEVEL        Effort level: minimal, moderate, maximum (default: moderate)")
+        print(f"  --max-iterations N    Maximum development iterations (default: from effort level)")
         print(f"  --understanding PATH  Path to understanding file or directory")
         print(f"  --continue            Continue previous agent conversations (for follow-up runs)")
         print(f"  --continuous          Run in continuous mode, processing tasks from a queue file")
@@ -1587,6 +1668,10 @@ if __name__ == "__main__":
         print(f"  --push                Push workspace changes back to origin (then exit)")
         print(f"  --pr                  Create a pull request instead of pushing directly")
         print(f"  --no-squash           Don't squash commits when pushing (default: squash)")
+        print(f"\nEffort levels:")
+        print(f"  minimal  - Fast (~5-15 min): working solution, basic tests")
+        print(f"  moderate - Balanced (~30-60 min): good practices, decent tests (default)")
+        print(f"  maximum  - Production (~2-3 hours): comprehensive testing & docs")
         print(f"\nThe loop runs autonomously. Human reviews FINAL_REPORT.md at the end.")
         print(f"\nExamples:")
         print(f"  {sys.argv[0]} --workspace iris --init-from /path/to/iris  # Clone local repo")
@@ -1610,7 +1695,8 @@ if __name__ == "__main__":
         print(f"       {sys.argv[0]} --continuous [options]")
         print(f"\nOptions:")
         print(f"  --workspace NAME      Named workspace (default: 'default')")
-        print(f"  --max-iterations N    Maximum development iterations (default: 3)")
+        print(f"  --effort LEVEL        Effort level: minimal, moderate, maximum (default: moderate)")
+        print(f"  --max-iterations N    Maximum development iterations (default: from effort level)")
         print(f"  --understanding PATH  Path to understanding file or directory")
         print(f"  --continue            Continue previous agent conversations (for follow-up runs)")
         print(f"  --continuous          Run in continuous mode, processing tasks from a queue file")
@@ -1619,6 +1705,10 @@ if __name__ == "__main__":
         print(f"  --push                Push workspace changes back to origin (then exit)")
         print(f"  --pr                  Create a pull request instead of pushing directly")
         print(f"  --no-squash           Don't squash commits when pushing (default: squash)")
+        print(f"\nEffort levels:")
+        print(f"  minimal  - Fast (~5-15 min): working solution, basic tests")
+        print(f"  moderate - Balanced (~30-60 min): good practices, decent tests (default)")
+        print(f"  maximum  - Production (~2-3 hours): comprehensive testing & docs")
         print(f"\nThe loop runs autonomously. Human reviews FINAL_REPORT.md at the end.")
         print(f"\nExamples:")
         print(f"  {sys.argv[0]} --workspace iris --init-from /path/to/iris  # Initialize workspace")
@@ -1643,10 +1733,19 @@ if __name__ == "__main__":
     continuous_mode = False
     queue_path = DEFAULT_QUEUE_PATH
     workspace_name = DEFAULT_WORKSPACE
+    effort = 'moderate'  # default effort level
 
     if "--workspace" in args:
         idx = args.index("--workspace")
         workspace_name = args[idx + 1]
+        args = args[:idx] + args[idx + 2:]
+
+    if "--effort" in args:
+        idx = args.index("--effort")
+        effort = args[idx + 1]
+        if effort not in EFFORT_CONFIGS:
+            print(f"Error: Invalid effort level '{effort}'. Must be one of: {', '.join(EFFORT_CONFIGS.keys())}")
+            sys.exit(1)
         args = args[:idx] + args[idx + 2:]
 
     # Set the workspace before any other operations
@@ -1704,7 +1803,8 @@ if __name__ == "__main__":
             queue_path=queue_path,
             max_iterations=max_iterations,
             understanding_path=understanding_path,
-            continue_conversations=continue_conversations
+            continue_conversations=continue_conversations,
+            effort=effort
         )
     else:
         # Run single task
@@ -1713,7 +1813,7 @@ if __name__ == "__main__":
             print("Error: No task specified. Use --continuous for queue mode or provide a task.")
             sys.exit(1)
 
-        result = run_pipeline(task, max_iterations, understanding_path, continue_conversations)
+        result = run_pipeline(task, max_iterations, understanding_path, continue_conversations, effort)
 
         print(f"\nWorkspace: {result['workspace']}")
         print(f"Run 'git log --oneline' in the workspace to see the commit history.")
