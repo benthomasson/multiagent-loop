@@ -143,6 +143,66 @@ def git_commit(message: str, files: list[str] | None = None) -> bool:
         print(f"  [git commit failed: {e}]")
         return False
 
+def load_env_file(env_path: str) -> bool:
+    """Copy a .env file to the workspace and load its variables.
+
+    The .env file is copied to the workspace root and its variables are
+    loaded into os.environ so agents inherit them. The .env file is added
+    to .gitignore to prevent committing secrets.
+
+    Returns True if successful, False otherwise.
+    """
+    source = Path(env_path).expanduser().resolve()
+    if not source.exists():
+        print(f"Error: .env file not found: {source}")
+        return False
+
+    workspace = get_workspace_dir()
+    workspace.mkdir(parents=True, exist_ok=True)
+
+    # Copy .env to workspace
+    dest = workspace / ".env"
+    import shutil
+    shutil.copy2(source, dest)
+    print(f"Copied {source} to {dest}")
+
+    # Add .env to .gitignore if not already there
+    gitignore = workspace / ".gitignore"
+    gitignore_content = gitignore.read_text() if gitignore.exists() else ""
+    if ".env" not in gitignore_content:
+        with open(gitignore, "a") as f:
+            if gitignore_content and not gitignore_content.endswith("\n"):
+                f.write("\n")
+            f.write(".env\n")
+        print("Added .env to .gitignore")
+
+    # Parse and load the .env file
+    loaded_vars = []
+    with open(dest) as f:
+        for line in f:
+            line = line.strip()
+            # Skip empty lines and comments
+            if not line or line.startswith("#"):
+                continue
+            # Handle KEY=VALUE format
+            if "=" in line:
+                # Handle optional 'export ' prefix
+                if line.startswith("export "):
+                    line = line[7:]
+                key, _, value = line.partition("=")
+                key = key.strip()
+                value = value.strip()
+                # Remove quotes if present
+                if (value.startswith('"') and value.endswith('"')) or \
+                   (value.startswith("'") and value.endswith("'")):
+                    value = value[1:-1]
+                os.environ[key] = value
+                loaded_vars.append(key)
+
+    print(f"Loaded {len(loaded_vars)} environment variables: {', '.join(loaded_vars)}")
+    return True
+
+
 def init_workspace():
     """Initialize the workspace directory, agents directory, and git repo."""
     get_workspace_dir().mkdir(parents=True, exist_ok=True)
@@ -1717,6 +1777,7 @@ def main():
         print(f"  --continuous          Run in continuous mode, processing tasks from a queue file")
         print(f"  --queue PATH          Path to queue file (default: queue.txt)")
         print(f"  --init-from PATH|URL  Clone repo into workspace (local path or git URL)")
+        print(f"  --env PATH            Copy .env file to workspace and load variables")
         print(f"  --push                Push workspace changes (archives artifacts to logs/)")
         print(f"  --pr                  Create a pull request instead of pushing directly")
         print(f"  --no-squash           Don't squash commits when pushing (default: squash)")
@@ -1755,6 +1816,7 @@ def main():
         print(f"  --continuous          Run in continuous mode, processing tasks from a queue file")
         print(f"  --queue PATH          Path to queue file (default: queue.txt)")
         print(f"  --init-from PATH|URL  Clone repo into workspace (local path or git URL)")
+        print(f"  --env PATH            Copy .env file to workspace and load variables")
         print(f"  --push                Push workspace changes (archives artifacts to logs/)")
         print(f"  --pr                  Create a pull request instead of pushing directly")
         print(f"  --no-squash           Don't squash commits when pushing (default: squash)")
@@ -1821,6 +1883,15 @@ def main():
             sys.exit(1)
         if not args:
             sys.exit(0)
+
+    # Handle --env early (load environment variables before running agents)
+    if "--env" in args:
+        idx = args.index("--env")
+        env_path = args[idx + 1]
+        args = args[:idx] + args[idx + 2:]
+        success = load_env_file(env_path)
+        if not success:
+            sys.exit(1)
 
     # Handle --push and --pr early (they exit after completing)
     if "--push" in args or "--pr" in args:
