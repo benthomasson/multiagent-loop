@@ -25,6 +25,10 @@ uv run supervisor.py --workspace myproject --env ~/.secrets/myproject.env "build
 # Read task from file (for complex prompts)
 uv run supervisor.py --workspace myproject --prompt-file task.md
 
+# GitLab workflow - fetch issue, run pipeline, create MR
+uv run supervisor.py --workspace issue-285 --gitlab-issue 285 --init-from ~/git/repo.git --effort minimal
+uv run supervisor.py --workspace issue-285 --gitlab-mr --push  # Create MR after completion
+
 # With shared understanding from Phase 0
 uv run supervisor.py --understanding workspace/SHARED_UNDERSTANDING.md "build the feature"
 

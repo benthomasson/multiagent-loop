@@ -282,6 +282,34 @@ EOF
 multiagent-loop --workspace user-api --prompt-file task.md
 ```
 
+### GitLab Integration
+
+Work on GitLab issues directly:
+
+```bash
+# Fetch issue #285, assign to self, use description as task
+multiagent-loop --workspace issue-285 \
+  --gitlab-issue 285 \
+  --init-from ~/git/myrepo.git \
+  --effort minimal
+
+# After completion, create merge request
+multiagent-loop --workspace issue-285 --gitlab-mr --push
+```
+
+The `--gitlab-issue` flag:
+- Fetches issue title and description via `glab issue view`
+- Assigns the issue to your GitLab user
+- Uses the issue body as the task prompt (adds `Closes #N`)
+- Auto-generates branch name: `fix/issue-285-description-slug`
+
+The `--gitlab-mr` flag:
+- Pushes the work branch to origin
+- Creates a merge request with the issue title
+- Assigns to current user
+
+**Requires:** [glab CLI](https://gitlab.com/gitlab-org/cli) installed and authenticated (`glab auth login`).
+
 ### Continuous Mode
 
 Process tasks from a queue file, running unattended:

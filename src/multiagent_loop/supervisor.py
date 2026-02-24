@@ -82,6 +82,163 @@ EFFORT_CONFIGS = {
     }
 }
 
+# =============================================================================
+# GitLab Integration
+# =============================================================================
+
+def check_glab_installed() -> bool:
+    """Check if glab CLI is installed and authenticated."""
+    try:
+        result = subprocess.run(
+            ["glab", "auth", "status"],
+            capture_output=True, text=True
+        )
+        return result.returncode == 0
+    except FileNotFoundError:
+        return False
+
+
+def gitlab_get_username() -> str | None:
+    """Get current GitLab username from glab auth status."""
+    try:
+        result = subprocess.run(
+            ["glab", "auth", "status"],
+            capture_output=True, text=True
+        )
+        # Parse output like "Logged in to gitlab.com as username"
+        for line in result.stdout.split('\n') + result.stderr.split('\n'):
+            if ' as ' in line:
+                # Extract username after "as "
+                parts = line.split(' as ')
+                if len(parts) >= 2:
+                    username = parts[-1].strip().split()[0]
+                    # Remove any trailing punctuation
+                    return username.rstrip('.,')
+        return None
+    except Exception:
+        return None
+
+
+def gitlab_fetch_issue(issue_number: int) -> dict | None:
+    """Fetch GitLab issue details via glab.
+
+    Returns dict with 'title', 'description', 'labels', 'web_url' or None on error.
+    """
+    try:
+        result = subprocess.run(
+            ["glab", "issue", "view", str(issue_number), "--output", "json"],
+            capture_output=True, text=True
+        )
+        if result.returncode != 0:
+            print(f"Error fetching issue #{issue_number}: {result.stderr}")
+            return None
+
+        data = json.loads(result.stdout)
+        return {
+            'number': issue_number,
+            'title': data.get('title', ''),
+            'description': data.get('description', ''),
+            'labels': data.get('labels', []),
+            'web_url': data.get('web_url', ''),
+        }
+    except json.JSONDecodeError as e:
+        print(f"Error parsing issue JSON: {e}")
+        return None
+    except Exception as e:
+        print(f"Error fetching issue: {e}")
+        return None
+
+
+def gitlab_assign_issue(issue_number: int, username: str | None = None) -> bool:
+    """Assign GitLab issue to a user (default: current user)."""
+    if username is None:
+        username = gitlab_get_username()
+    if username is None:
+        print("Could not determine GitLab username")
+        return False
+
+    result = subprocess.run(
+        ["glab", "issue", "update", str(issue_number), "--assignee", username],
+        capture_output=True, text=True
+    )
+    if result.returncode != 0:
+        print(f"Warning: Could not assign issue #{issue_number}: {result.stderr}")
+        return False
+    print(f"Assigned issue #{issue_number} to {username}")
+    return True
+
+
+def gitlab_create_mr(
+    source_branch: str,
+    title: str,
+    description: str,
+    target_branch: str = "main",
+    assignee: str | None = None
+) -> str | None:
+    """Create GitLab merge request via glab.
+
+    Returns MR URL on success, None on failure.
+    """
+    cmd = [
+        "glab", "mr", "create",
+        "--source-branch", source_branch,
+        "--target-branch", target_branch,
+        "--title", title,
+        "--description", description,
+        "--fill",  # Fill in defaults
+    ]
+
+    if assignee:
+        cmd.extend(["--assignee", assignee])
+
+    result = subprocess.run(cmd, capture_output=True, text=True)
+
+    if result.returncode != 0:
+        print(f"Error creating MR: {result.stderr}")
+        return None
+
+    # Parse MR URL from output
+    output = result.stdout + result.stderr
+    for line in output.split('\n'):
+        if 'merge_requests' in line or 'http' in line.lower():
+            # Extract URL
+            import re
+            urls = re.findall(r'https?://[^\s]+', line)
+            if urls:
+                return urls[0]
+
+    print(f"MR created: {output.strip()}")
+    return output.strip()
+
+
+def slugify(text: str, max_length: int = 50) -> str:
+    """Convert text to URL-friendly slug."""
+    import re
+    # Lowercase and replace spaces/special chars with hyphens
+    slug = re.sub(r'[^a-z0-9]+', '-', text.lower())
+    # Remove leading/trailing hyphens
+    slug = slug.strip('-')
+    # Truncate
+    if len(slug) > max_length:
+        slug = slug[:max_length].rstrip('-')
+    return slug
+
+
+def gitlab_branch_name(issue: dict) -> str:
+    """Generate branch name from GitLab issue."""
+    number = issue['number']
+    title_slug = slugify(issue['title'], max_length=40)
+    return f"fix/issue-{number}-{title_slug}"
+
+
+def gitlab_build_prompt(issue: dict) -> str:
+    """Build task prompt from GitLab issue."""
+    prompt = f"## {issue['title']}\n\n"
+    prompt += issue['description'] or "(No description provided)"
+    prompt += f"\n\nCloses #{issue['number']}"
+    return prompt
+
+
 def read_queue(queue_path: Path) -> list[str]:
     """Read all tasks from the queue file. Returns empty list if file doesn't exist."""
     if not queue_path.exists():
@@ -1780,9 +1937,13 @@ def main():
         print(f"  --env PATH            Copy .env file to workspace and load variables")
         print(f"  --prompt-file PATH    Read task description from file instead of command line")
         print(f"  --push                Push workspace changes (archives artifacts to logs/)")
-        print(f"  --pr                  Create a pull request instead of pushing directly")
+        print(f"  --pr                  Create a GitHub pull request instead of pushing directly")
         print(f"  --no-squash           Don't squash commits when pushing (default: squash)")
         print(f"  --no-questions        Disable all interactive prompts (auto-respond with defaults)")
+        print(f"\nGitLab options:")
+        print(f"  --gitlab-issue NUM    Fetch GitLab issue, assign to self, use as task prompt")
+        print(f"  --gitlab-mr           Create GitLab merge request after successful run")
+        print(f"  --branch NAME         Override auto-generated branch name")
         print(f"\nEffort levels:")
         print(f"  minimal  - Fast (~5-15 min): working solution, basic tests")
         print(f"  moderate - Balanced (~30-60 min): good practices, decent tests (default)")
@@ -1797,6 +1958,9 @@ def main():
         print(f"  {sys.argv[0]} 'write a function to calculate fibonacci numbers'")
         print(f"  {sys.argv[0]} --max-iterations 5 'complex feature'")
         print(f"  {sys.argv[0]} --continue 'fix the bug identified in the last run'")
+        print(f"\nGitLab workflow:")
+        print(f"  {sys.argv[0]} --workspace issue-285 --gitlab-issue 285 --init-from ~/repo.git")
+        print(f"  {sys.argv[0]} --workspace issue-285 --gitlab-mr --push   # Push and create MR")
         print(f"\nContinuous mode:")
         print(f"  {sys.argv[0]} --continuous")
         print(f"  {sys.argv[0]} --continuous --queue my_tasks.txt")
@@ -1820,9 +1984,12 @@ def main():
         print(f"  --env PATH            Copy .env file to workspace and load variables")
         print(f"  --prompt-file PATH    Read task description from file instead of command line")
         print(f"  --push                Push workspace changes (archives artifacts to logs/)")
-        print(f"  --pr                  Create a pull request instead of pushing directly")
+        print(f"  --pr                  Create a GitHub pull request instead of pushing directly")
         print(f"  --no-squash           Don't squash commits when pushing (default: squash)")
         print(f"  --no-questions        Disable all interactive prompts (auto-respond with defaults)")
+        print(f"  --gitlab-issue NUM    Fetch GitLab issue, assign to self, use as task prompt")
+        print(f"  --gitlab-mr           Create GitLab merge request after successful run")
+        print(f"  --branch NAME         Override auto-generated branch name")
         print(f"\nEffort levels:")
         print(f"  minimal  - Fast (~5-15 min): working solution, basic tests")
         print(f"  moderate - Balanced (~30-60 min): good practices, decent tests (default)")
@@ -1837,6 +2004,8 @@ def main():
         print(f"  {sys.argv[0]} --understanding ./context/ 'build feature'  # directory of docs")
         print(f"  {sys.argv[0]} --max-iterations 5 'complex feature'")
         print(f"  {sys.argv[0]} --continue 'fix the bug identified in the last run'")
+        print(f"\nGitLab workflow:")
+        print(f"  {sys.argv[0]} --workspace issue-285 --gitlab-issue 285 --init-from ~/repo.git")
         print(f"\nContinuous mode:")
         print(f"  {sys.argv[0]} --continuous")
         print(f"  {sys.argv[0]} --continuous --queue my_tasks.txt")
@@ -1853,6 +2022,9 @@ def main():
     workspace_name = DEFAULT_WORKSPACE
     effort = 'moderate'  # default effort level
     no_questions = False  # disable all user prompts
+    gitlab_issue_number = None  # GitLab issue to fetch
+    gitlab_mr = False  # Create GitLab MR after run
+    branch_name = None  # Override branch name
 
     if "--workspace" in args:
         idx = args.index("--workspace")
@@ -1871,6 +2043,34 @@ def main():
         idx = args.index("--no-questions")
         no_questions = True
         args = args[:idx] + args[idx + 1:]
+
+    # GitLab integration flags
+    if "--gitlab-issue" in args:
+        idx = args.index("--gitlab-issue")
+        gitlab_issue_number = int(args[idx + 1])
+        args = args[:idx] + args[idx + 2:]
+        # Check glab is installed
+        if not check_glab_installed():
+            print("Error: glab CLI is not installed or not authenticated.")
+            print("Install: https://gitlab.com/gitlab-org/cli")
+            print("Authenticate: glab auth login")
+            sys.exit(1)
+
+    if "--gitlab-mr" in args:
+        idx = args.index("--gitlab-mr")
+        gitlab_mr = True
+        args = args[:idx] + args[idx + 1:]
+        # Check glab is installed
+        if not check_glab_installed():
+            print("Error: glab CLI is not installed or not authenticated.")
+            print("Install: https://gitlab.com/gitlab-org/cli")
+            print("Authenticate: glab auth login")
+            sys.exit(1)
+
+    if "--branch" in args:
+        idx = args.index("--branch")
+        branch_name = args[idx + 1]
+        args = args[:idx] + args[idx + 2:]
 
     # Set the workspace before any other operations
     set_workspace(workspace_name)
@@ -1943,6 +2143,22 @@ def main():
             print(f"Error: Prompt file not found: {prompt_file}")
             sys.exit(1)
 
+    # Handle GitLab issue - fetch and use as task
+    gitlab_issue = None
+    if gitlab_issue_number:
+        print(f"Fetching GitLab issue #{gitlab_issue_number}...")
+        gitlab_issue = gitlab_fetch_issue(gitlab_issue_number)
+        if not gitlab_issue:
+            print(f"Error: Could not fetch GitLab issue #{gitlab_issue_number}")
+            sys.exit(1)
+        print(f"Issue: {gitlab_issue['title']}")
+        # Assign to self
+        gitlab_assign_issue(gitlab_issue_number)
+        # Generate branch name if not specified
+        if not branch_name:
+            branch_name = gitlab_branch_name(gitlab_issue)
+            print(f"Branch: {branch_name}")
+
     if continuous_mode:
         # Run in continuous mode
         run_continuous(
@@ -1954,20 +2170,67 @@ def main():
             no_questions=no_questions
         )
     else:
-        # Run single task - from file or command line
-        if prompt_file:
+        # Run single task - from GitLab issue, file, or command line
+        if gitlab_issue:
+            task = gitlab_build_prompt(gitlab_issue)
+            print(f"Using GitLab issue #{gitlab_issue_number} as task")
+        elif prompt_file:
             task = prompt_file.read_text().strip()
             print(f"Read task from: {prompt_file}")
         else:
             task = " ".join(args)
         if not task:
-            print("Error: No task specified. Use --continuous for queue mode or provide a task.")
+            print("Error: No task specified. Use --gitlab-issue, --prompt-file, --continuous, or provide a task.")
             sys.exit(1)
 
         result = run_pipeline(task, max_iterations, understanding_path, continue_conversations, effort, no_questions)
 
         print(f"\nWorkspace: {result['workspace']}")
         print(f"Run 'git log --oneline' in the workspace to see the commit history.")
+
+        # Handle GitLab MR creation
+        if gitlab_mr and result.get("final_satisfied"):
+            print(f"\nCreating GitLab merge request...")
+            workspace = get_workspace_dir()
+            env = os.environ.copy()
+            env.pop("CLAUDECODE", None)
+
+            # Determine branch name
+            mr_branch = branch_name or "multiagent-work"
+
+            # Checkout/create the branch
+            subprocess.run(
+                ["git", "checkout", "-B", mr_branch],
+                cwd=workspace, env=env, capture_output=True
+            )
+
+            # Push the branch
+            print(f"Pushing branch {mr_branch}...")
+            push_result = subprocess.run(
+                ["git", "push", "-u", "origin", mr_branch],
+                cwd=workspace, env=env, capture_output=True, text=True
+            )
+            if push_result.returncode != 0:
+                print(f"Error pushing branch: {push_result.stderr}")
+            else:
+                # Create MR
+                mr_title = gitlab_issue['title'] if gitlab_issue else task[:70]
+                mr_description = f"## Description\n\n{task[:500]}\n\n"
+                if gitlab_issue:
+                    mr_description += f"Closes #{gitlab_issue['number']}\n\n"
+                mr_description += "🤖 Generated with [multiagent-loop](https://github.com/benthomasson/multiagent-loop)"
+
+                mr_url = gitlab_create_mr(
+                    source_branch=mr_branch,
+                    title=mr_title,
+                    description=mr_description,
+                    target_branch="main",
+                    assignee=gitlab_get_username()
+                )
+                if mr_url:
+                    print(f"Merge request created: {mr_url}")
+        elif gitlab_mr and not result.get("final_satisfied"):
+            print(f"\nSkipping MR creation - pipeline did not complete successfully")
 
 
 if __name__ == "__main__":
