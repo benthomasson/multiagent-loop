@@ -22,6 +22,9 @@ uv run supervisor.py --workspace iris --pr                        # Or create a 
 # Environment variables - load secrets for agents
 uv run supervisor.py --workspace myproject --env ~/.secrets/myproject.env "build API integration"
 
+# Read task from file (for complex prompts)
+uv run supervisor.py --workspace myproject --prompt-file task.md
+
 # With shared understanding from Phase 0
 uv run supervisor.py --understanding workspace/SHARED_UNDERSTANDING.md "build the feature"
 

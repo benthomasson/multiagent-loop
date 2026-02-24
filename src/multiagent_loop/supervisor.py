@@ -1778,6 +1778,7 @@ def main():
         print(f"  --queue PATH          Path to queue file (default: queue.txt)")
         print(f"  --init-from PATH|URL  Clone repo into workspace (local path or git URL)")
         print(f"  --env PATH            Copy .env file to workspace and load variables")
+        print(f"  --prompt-file PATH    Read task description from file instead of command line")
         print(f"  --push                Push workspace changes (archives artifacts to logs/)")
         print(f"  --pr                  Create a pull request instead of pushing directly")
         print(f"  --no-squash           Don't squash commits when pushing (default: squash)")
@@ -1817,6 +1818,7 @@ def main():
         print(f"  --queue PATH          Path to queue file (default: queue.txt)")
         print(f"  --init-from PATH|URL  Clone repo into workspace (local path or git URL)")
         print(f"  --env PATH            Copy .env file to workspace and load variables")
+        print(f"  --prompt-file PATH    Read task description from file instead of command line")
         print(f"  --push                Push workspace changes (archives artifacts to logs/)")
         print(f"  --pr                  Create a pull request instead of pushing directly")
         print(f"  --no-squash           Don't squash commits when pushing (default: squash)")
@@ -1931,6 +1933,16 @@ def main():
         queue_path = Path(args[idx + 1])
         args = args[:idx] + args[idx + 2:]
 
+    # Handle --prompt-file (read task from file)
+    prompt_file = None
+    if "--prompt-file" in args:
+        idx = args.index("--prompt-file")
+        prompt_file = Path(args[idx + 1]).expanduser()
+        args = args[:idx] + args[idx + 2:]
+        if not prompt_file.exists():
+            print(f"Error: Prompt file not found: {prompt_file}")
+            sys.exit(1)
+
     if continuous_mode:
         # Run in continuous mode
         run_continuous(
@@ -1942,8 +1954,12 @@ def main():
             no_questions=no_questions
         )
     else:
-        # Run single task
-        task = " ".join(args)
+        # Run single task - from file or command line
+        if prompt_file:
+            task = prompt_file.read_text().strip()
+            print(f"Read task from: {prompt_file}")
+        else:
+            task = " ".join(args)
         if not task:
             print("Error: No task specified. Use --continuous for queue mode or provide a task.")
             sys.exit(1)

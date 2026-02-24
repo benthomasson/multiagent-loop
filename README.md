@@ -261,6 +261,27 @@ The `.env` file is:
 
 Supports standard `.env` format: comments (`#`), empty lines, `export` prefix, and quoted values.
 
+### Reading Task from File
+
+For complex task descriptions, read from a file:
+
+```bash
+# Create a detailed task file
+cat > task.md << 'EOF'
+Build a REST API for user management with the following requirements:
+
+- POST /users - Create user (name, email required)
+- GET /users/:id - Get user by ID
+- PUT /users/:id - Update user
+- DELETE /users/:id - Delete user
+
+Use SQLite for storage. Include input validation and proper error responses.
+EOF
+
+# Run with the task file
+multiagent-loop --workspace user-api --prompt-file task.md
+```
+
 ### Continuous Mode
 
 Process tasks from a queue file, running unattended:
