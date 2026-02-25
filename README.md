@@ -287,15 +287,31 @@ multiagent-loop --workspace user-api --prompt-file task.md
 Work on GitLab issues directly:
 
 ```bash
-# Fetch issue #285, assign to self, use description as task
+# Clone from GitLab directly (glab auto-detects project)
 multiagent-loop --workspace issue-285 \
+  --init-from git@gitlab.com:org/repo.git \
   --gitlab-issue 285 \
-  --init-from ~/git/myrepo.git \
+  --effort minimal
+
+# Or clone from local bare repo with explicit GitLab remote
+multiagent-loop --workspace issue-285 \
+  --init-from ~/git/repo.git \
+  --gitlab-remote git@gitlab.com:org/repo.git \
+  --gitlab-issue 285 \
   --effort minimal
 
 # After completion, create merge request
 multiagent-loop --workspace issue-285 --gitlab-mr --push
 ```
+
+**GitLab flags:**
+
+| Flag | Description |
+|------|-------------|
+| `--gitlab-issue NUM` | Fetch issue, assign to self, use as task prompt |
+| `--gitlab-mr` | Create merge request after successful run |
+| `--gitlab-remote URL` | Add GitLab remote (required for bare repo workflows) |
+| `--branch NAME` | Override auto-generated branch name |
 
 The `--gitlab-issue` flag:
 - Fetches issue title and description via `glab issue view`
@@ -308,7 +324,12 @@ The `--gitlab-mr` flag:
 - Creates a merge request with the issue title
 - Assigns to current user
 - **Auto-detects MR template** from `.gitlab/merge_request_templates/Default.md`
-- Fills in template sections: Description, Type of Change, Changes Made, Related Issues
+- Uses Claude to intelligently fill in template sections
+
+The `--gitlab-remote` flag:
+- Adds a `gitlab` remote to the workspace after cloning
+- Required when cloning from a local bare repo (where `origin` points locally)
+- Allows `glab` to detect the GitLab project
 
 **Requires:** [glab CLI](https://gitlab.com/gitlab-org/cli) installed and authenticated (`glab auth login`).
 
