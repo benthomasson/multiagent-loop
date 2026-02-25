@@ -2110,6 +2110,7 @@ def main():
         print(f"\nGitLab options:")
         print(f"  --gitlab-issue NUM    Fetch GitLab issue, assign to self, use as task prompt")
         print(f"  --gitlab-mr           Create GitLab merge request after successful run")
+        print(f"  --gitlab-remote URL   Add GitLab remote (for bare repo workflows)")
         print(f"  --branch NAME         Override auto-generated branch name")
         print(f"\nEffort levels:")
         print(f"  minimal  - Fast (~5-15 min): working solution, basic tests")
@@ -2125,8 +2126,8 @@ def main():
         print(f"  {sys.argv[0]} 'write a function to calculate fibonacci numbers'")
         print(f"  {sys.argv[0]} --max-iterations 5 'complex feature'")
         print(f"  {sys.argv[0]} --continue 'fix the bug identified in the last run'")
-        print(f"\nGitLab workflow:")
-        print(f"  {sys.argv[0]} --workspace issue-285 --gitlab-issue 285 --init-from ~/repo.git")
+        print(f"\nGitLab workflow (bare repo):")
+        print(f"  {sys.argv[0]} --workspace issue-285 --init-from ~/repo.git --gitlab-remote git@gitlab.com:org/repo.git --gitlab-issue 285")
         print(f"  {sys.argv[0]} --workspace issue-285 --gitlab-mr --push   # Push and create MR")
         print(f"\nContinuous mode:")
         print(f"  {sys.argv[0]} --continuous")
@@ -2156,6 +2157,7 @@ def main():
         print(f"  --no-questions        Disable all interactive prompts (auto-respond with defaults)")
         print(f"  --gitlab-issue NUM    Fetch GitLab issue, assign to self, use as task prompt")
         print(f"  --gitlab-mr           Create GitLab merge request after successful run")
+        print(f"  --gitlab-remote URL   Add GitLab remote (for bare repo workflows)")
         print(f"  --branch NAME         Override auto-generated branch name")
         print(f"\nEffort levels:")
         print(f"  minimal  - Fast (~5-15 min): working solution, basic tests")
@@ -2171,8 +2173,8 @@ def main():
         print(f"  {sys.argv[0]} --understanding ./context/ 'build feature'  # directory of docs")
         print(f"  {sys.argv[0]} --max-iterations 5 'complex feature'")
         print(f"  {sys.argv[0]} --continue 'fix the bug identified in the last run'")
-        print(f"\nGitLab workflow:")
-        print(f"  {sys.argv[0]} --workspace issue-285 --gitlab-issue 285 --init-from ~/repo.git")
+        print(f"\nGitLab workflow (bare repo):")
+        print(f"  {sys.argv[0]} --workspace issue-285 --init-from ~/repo.git --gitlab-remote git@gitlab.com:org/repo.git --gitlab-issue 285")
         print(f"\nContinuous mode:")
         print(f"  {sys.argv[0]} --continuous")
         print(f"  {sys.argv[0]} --continuous --queue my_tasks.txt")
@@ -2239,6 +2241,13 @@ def main():
         branch_name = args[idx + 1]
         args = args[:idx] + args[idx + 2:]
 
+    # GitLab remote URL (for bare repo workflows)
+    gitlab_remote_url = None
+    if "--gitlab-remote" in args:
+        idx = args.index("--gitlab-remote")
+        gitlab_remote_url = args[idx + 1]
+        args = args[:idx] + args[idx + 2:]
+
     # Set the workspace before any other operations
     set_workspace(workspace_name)
 
@@ -2250,6 +2259,16 @@ def main():
         success = init_workspace_from(source)
         if not success:
             sys.exit(1)
+        # Add GitLab remote if specified (for bare repo workflows)
+        if gitlab_remote_url:
+            workspace = get_workspace_dir()
+            env = os.environ.copy()
+            env.pop("CLAUDECODE", None)
+            subprocess.run(
+                ["git", "remote", "add", "gitlab", gitlab_remote_url],
+                cwd=workspace, env=env, capture_output=True
+            )
+            print(f"  Added 'gitlab' remote: {gitlab_remote_url}")
         if not args:
             sys.exit(0)
 
