@@ -646,8 +646,13 @@ def push_workspace(branch: str = "main", create_pr: bool = False, squash: bool =
     # Artifact files/directories to remove before pushing
     # Artifact files to remove - preserve test_*.py files
     ARTIFACT_PATTERNS = [
+        # Legacy non-versioned files
         "TASK.md", "PLAN.md", "IMPLEMENTATION.md", "REVIEW.md", "USAGE.md",
         "USER_FEEDBACK.md", "FINAL_REPORT.md", "CUMULATIVE_UNDERSTANDING.md",
+        # Versioned artifacts (PLAN_1.md, IMPLEMENTATION_1_2.md, etc.)
+        "PLAN_*.md", "IMPLEMENTATION_*.md", "REVIEW_*.md", "TESTER_*.md",
+        "USER_FEEDBACK_*.md",
+        # Other patterns
         "ITERATION_*.md", "planner/", "implementer/", "reviewer/", "user/",
         "tester/USAGE.md", "tester/*.md",  # Keep tester/test_*.py
         "entries/", "beliefs.md", "nogoods.md"
