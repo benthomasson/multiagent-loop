@@ -883,11 +883,21 @@ def apply_exit_gate(verdict: dict, agent_type: str) -> dict:
     return verdict
 
 
-def save_entry(iteration: int, role: str, content: str) -> Path:
-    """Save agent output to iteration-ordered entry structure."""
+def save_entry(iteration: int, role: str, content: str, inner: int | None = None) -> Path:
+    """Save agent output to iteration-ordered entry structure.
+
+    Args:
+        iteration: Outer iteration number
+        role: Agent role name
+        content: Content to save
+        inner: Inner loop iteration (for reviewer/implementer cycles)
+    """
     entry_dir = get_workspace_dir() / "entries" / f"iteration-{iteration}"
     entry_dir.mkdir(parents=True, exist_ok=True)
-    path = entry_dir / f"{role}.md"
+    if inner is not None:
+        path = entry_dir / f"{role}_{inner}.md"
+    else:
+        path = entry_dir / f"{role}.md"
     path.write_text(content)
     return path
 
@@ -1035,8 +1045,8 @@ QUESTION FOR HUMAN: [your question here]"""
 
     response = run_agent("planner", prompt, continue_session=(continue_conversations or iteration > 1))
 
-    # Save plan to workspace
-    save_artifact("PLAN.md", f"# Plan\n\nTask: {task}\n\n{response}")
+    # Save plan to workspace (versioned by iteration)
+    save_artifact(f"PLAN_{iteration}.md", f"# Plan (Iteration {iteration})\n\nTask: {task}\n\n{response}")
     git_commit(f"[planner] Plan for: {task[:50]}...")
 
     return {
@@ -1136,9 +1146,7 @@ QUESTION FOR HUMAN: [your question here]"""
             files_created.append(filename.strip())
 
     # files_created is already populated above
-
-    # Also save the full response
-    save_artifact("IMPLEMENTATION.md", f"# Implementation\n\n{response}")
+    # Note: versioned artifact save happens in run_iteration()
 
     if files_created:
         git_commit(f"[implementer] Implement: {', '.join(files_created)}")
@@ -1212,8 +1220,7 @@ QUESTION FOR HUMAN: [your question here]"""
 
     response = run_agent("reviewer", prompt, continue_session=(continue_conversations or iteration > 1))
 
-    # Save review
-    save_artifact("REVIEW.md", f"# Code Review\n\n{response}")
+    # Note: versioned artifact save happens in run_iteration()
     git_commit("[reviewer] Code review complete")
 
     verdict = parse_verdict(response)
@@ -1314,8 +1321,7 @@ QUESTION FOR HUMAN: [your question here]"""
             save_artifact(filename.strip(), code.strip())
             test_files.append(filename.strip())
 
-    # Save usage docs
-    save_artifact("USAGE.md", f"# Usage Instructions\n\n{response}")
+    # Note: versioned artifact save happens in run_iteration()
     git_commit("[tester] Tests and usage documentation")
 
     # Determine if tests passed
@@ -1395,8 +1401,8 @@ QUESTION FOR HUMAN: [your question here]"""
 
     response = run_agent("user", prompt, continue_session=(continue_conversations or iteration > 1))
 
-    # Save user feedback
-    save_artifact("USER_FEEDBACK.md", f"# User Feedback\n\n{response}")
+    # Save user feedback (versioned by iteration)
+    save_artifact(f"USER_FEEDBACK_{iteration}.md", f"# User Feedback (Iteration {iteration})\n\n{response}")
     git_commit("[user] User feedback and feature requests")
 
     verdict = parse_verdict(response)
@@ -1454,7 +1460,7 @@ def run_iteration(task: str, iteration: int, user_feedback: str | None = None,
         print(f"\n[1/5] PLANNER skipped - using provided plan")
         results["planner"] = existing_plan
         plan_result = {"output": existing_plan}  # For beliefs registration below
-        save_artifact("PLAN.md", f"# Plan (Provided)\n\nTask: {task}\n\n{existing_plan}")
+        save_artifact(f"PLAN_{iteration}.md", f"# Plan (Provided, Iteration {iteration})\n\nTask: {task}\n\n{existing_plan}")
         git_commit(f"[planner] Using provided plan for: {task[:50]}...")
         save_entry(iteration, "planner", results["planner"])
         print(f"\n{results['planner'][:500]}...\n")
@@ -1490,7 +1496,8 @@ def run_iteration(task: str, iteration: int, user_feedback: str | None = None,
         impl_result = implementer(results["planner"], task_for_impl, reviewer_feedback, iteration, continue_conversations or inner_iteration > 1)
         results["implementer"] = process_agent_output("implementer", impl_result["output"], iteration, no_questions)
         results["files_created"] = impl_result.get("files_created", [])
-        save_entry(iteration, "implementer", results["implementer"])
+        save_entry(iteration, "implementer", results["implementer"], inner=inner_iteration)
+        save_artifact(f"IMPLEMENTATION_{iteration}_{inner_iteration}.md", f"# Implementation (Iteration {iteration}, Attempt {inner_iteration})\n\n{results['implementer']}")
         print(f"\n{results['implementer']}\n")
 
         # Beliefs: register implemented files as DERIVED claims
@@ -1510,7 +1517,8 @@ def run_iteration(task: str, iteration: int, user_feedback: str | None = None,
             review_result = reviewer(results["implementer"], task_for_reviewer, iteration, continue_conversations or inner_iteration > 1)
             results["reviewer"] = process_agent_output("reviewer", review_result["output"], iteration, no_questions)
             results["approved"] = review_result["approved"]
-            save_entry(iteration, "reviewer", results["reviewer"])
+            save_entry(iteration, "reviewer", results["reviewer"], inner=inner_iteration)
+            save_artifact(f"REVIEW_{iteration}_{inner_iteration}.md", f"# Review (Iteration {iteration}, Attempt {inner_iteration})\n\n{results['reviewer']}")
             print(f"\n{results['reviewer']}\n")
 
         # Beliefs: register reviewer issues as WARNINGs
@@ -1548,7 +1556,10 @@ def run_iteration(task: str, iteration: int, user_feedback: str | None = None,
             impl_result = implementer(results["planner"], task, tester_feedback, iteration, True)
             results["implementer"] = process_agent_output("implementer", impl_result["output"], iteration, no_questions)
             results["files_created"] = impl_result.get("files_created", [])
-            save_entry(iteration, "implementer", results["implementer"])
+            # Use tester_iteration + max offset to distinguish from review loop iterations
+            impl_attempt = inner_iteration + tester_iteration
+            save_entry(iteration, "implementer", results["implementer"], inner=impl_attempt)
+            save_artifact(f"IMPLEMENTATION_{iteration}_{impl_attempt}.md", f"# Implementation (Iteration {iteration}, Attempt {impl_attempt} - test fix)\n\n{results['implementer']}")
             print(f"\n{results['implementer']}\n")
 
             print(f"\n[4/5] TESTER re-running tests...")
@@ -1564,7 +1575,8 @@ def run_iteration(task: str, iteration: int, user_feedback: str | None = None,
         test_result = tester(results["implementer"], task_for_tester, reviewer_notes_for_tester, iteration, continue_conversations or tester_iteration > 1)
         results["tester"] = process_agent_output("tester", test_result["output"], iteration, no_questions)
         results["tests_passed"] = test_result.get("tests_passed", True)
-        save_entry(iteration, "tester", results["tester"])
+        save_entry(iteration, "tester", results["tester"], inner=tester_iteration)
+        save_artifact(f"TESTER_{iteration}_{tester_iteration}.md", f"# Tester (Iteration {iteration}, Attempt {tester_iteration})\n\n{results['tester']}")
         print(f"\n{results['tester']}\n")
 
         # Beliefs: register test results as OBSERVATIONs

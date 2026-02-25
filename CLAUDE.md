@@ -144,9 +144,20 @@ The supervisor parses `STATUS` and `OPEN_ISSUES` as separate fields. An **exit g
 
 Agents can request human input with markers like `QUESTION FOR HUMAN:`. Supervisor pauses for input when detected.
 
-### Iteration Entries
+### Iteration Entries and Versioned Artifacts
 
-Each agent's full output is saved to `entries/iteration-{N}/{role}.md` in the workspace. This provides an immutable audit trail without the truncation of `ITERATION_N_UNDERSTANDING.md`. Inner loop re-runs overwrite the same entry file (captures final state per role per iteration).
+Each agent's output is saved with versioned filenames to preserve the full history for evaluation:
+
+**Entries** (raw outputs): `entries/iteration-{N}/{role}.md` or `entries/iteration-{N}/{role}_{inner}.md` for inner loops.
+
+**Artifacts** (formatted working files):
+- `PLAN_{iteration}.md` - Planner output per iteration
+- `IMPLEMENTATION_{iteration}_{attempt}.md` - Implementer output per attempt
+- `REVIEW_{iteration}_{attempt}.md` - Reviewer output per attempt
+- `TESTER_{iteration}_{attempt}.md` - Tester output per attempt
+- `USER_FEEDBACK_{iteration}.md` - User feedback per iteration
+
+Inner loop attempts are numbered sequentially (e.g., `IMPLEMENTATION_1_1.md`, `IMPLEMENTATION_1_2.md` for review fixes, `IMPLEMENTATION_1_4.md` for test fixes).
 
 ### Beliefs Integration
 
