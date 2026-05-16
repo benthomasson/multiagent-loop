@@ -9,17 +9,12 @@ Agent runner utility - runs claude -p in a specific agent directory
 to maintain separate conversation contexts per agent role.
 
 Each agent has:
-- Their own session directory (agents/{role}/) for conversation isolation
-- Their own workspace subdirectory (workspace/{role}/) for file operations
-- Their own git branch for commits
+- Their own session directory (.sdlc-loop/agents/{role}/) for conversation isolation
+- Their own artifact directory (.sdlc-loop/artifacts/{role}/) for SDLC outputs
 - Specific tool permissions
 
-Workflow:
-1. Agent checks out their branch, merges from main
-2. Agent reads files from workspace + gets prompt
-3. Agent does work (with tools if permitted)
-4. Agent commits to their branch
-5. Supervisor merges back to main when stage completes
+Source-modifying agents (implementer, tester) work directly in the code repo root.
+All SDLC artifacts are stored under .sdlc-loop/ which is gitignored.
 """
 
 import os
@@ -28,19 +23,52 @@ import sys
 from datetime import datetime
 from pathlib import Path
 
-BASE_DIR = Path.cwd()
-LOG_FILE = BASE_DIR / "multiagent.log"
-PIDS_DIR = BASE_DIR / "pids"
+# Repo root — the actual code repository agents work in
+_repo_root: Path | None = None
 
-# Default workspace name for backward compatibility
+
+def set_repo_root(path: Path) -> None:
+    """Set the target code repo root."""
+    global _repo_root
+    _repo_root = path
+
+
+def get_repo_root() -> Path:
+    """Get the target code repo root. Defaults to CWD."""
+    return _repo_root or Path.cwd()
+
+
+def get_sdlc_dir() -> Path:
+    """Get the .sdlc-loop directory for SDLC state."""
+    return get_repo_root() / ".sdlc-loop"
+
+
+def get_artifacts_dir() -> Path:
+    """Get the artifacts directory for SDLC documents."""
+    return get_sdlc_dir() / "artifacts"
+
+
+def get_workspace_dir(workspace_name: str | None = None) -> Path:
+    """Get the workspace directory (the code repo root).
+
+    The workspace_name parameter is accepted for backward compatibility
+    but ignored — agents always work in the repo root.
+    """
+    return get_repo_root()
+
+
+def get_agents_dir(workspace_name: str | None = None) -> Path:
+    """Get the agents session directory under .sdlc-loop/."""
+    return get_sdlc_dir() / "agents"
+
+
+# Workspace name — kept for backward compat with supervisor references
 DEFAULT_WORKSPACE = "default"
-
-# Current workspace name (can be set via set_workspace())
 _current_workspace = DEFAULT_WORKSPACE
 
 
 def set_workspace(name: str) -> None:
-    """Set the current workspace name."""
+    """Set the current workspace name (legacy, mostly unused)."""
     global _current_workspace
     _current_workspace = name
 
@@ -50,30 +78,18 @@ def get_workspace_name() -> str:
     return _current_workspace
 
 
-def get_workspace_dir(workspace_name: str | None = None) -> Path:
-    """Get the workspace directory for a given workspace name."""
-    name = workspace_name or _current_workspace
-    return BASE_DIR / "workspaces" / name
-
-
-def get_agents_dir(workspace_name: str | None = None) -> Path:
-    """Get the agents directory for a given workspace name."""
-    name = workspace_name or _current_workspace
-    return BASE_DIR / "agents" / name
-
-
-# Target branch for agent merges (default: main)
+# Target branch for commits (default: main)
 _target_branch = "main"
 
 
 def set_target_branch(branch: str) -> None:
-    """Set the target branch for agent merges."""
+    """Set the target branch for work."""
     global _target_branch
     _target_branch = branch
 
 
 def get_target_branch() -> str:
-    """Get the target branch for agent merges."""
+    """Get the target branch."""
     return _target_branch
 
 
@@ -86,7 +102,9 @@ def _get_log_file():
     """Get or create log file handle."""
     global _log_file_handle
     if _log_file_handle is None:
-        _log_file_handle = open(LOG_FILE, "a")
+        log_file = get_sdlc_dir() / "multiagent.log"
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        _log_file_handle = open(log_file, "a")
     return _log_file_handle
 
 
@@ -95,21 +113,24 @@ def log(msg: str, level: str = "INFO"):
     timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
     log_line = f"[{timestamp}] [{level}] {msg}"
 
-    # Always write to file
     f = _get_log_file()
     f.write(log_line + "\n")
     f.flush()
 
-    # Print to stderr if verbose or error/warn
     if VERBOSE or level in ["ERROR", "WARN"]:
         print(log_line, file=sys.stderr)
 
 
 # PID file management
+def _pids_dir() -> Path:
+    return get_sdlc_dir() / "pids"
+
+
 def write_pid(role: str, pid: int) -> Path:
     """Write PID file for an agent."""
-    PIDS_DIR.mkdir(parents=True, exist_ok=True)
-    pid_file = PIDS_DIR / f"{role}.pid"
+    pids = _pids_dir()
+    pids.mkdir(parents=True, exist_ok=True)
+    pid_file = pids / f"{role}.pid"
     pid_file.write_text(str(pid))
     log(f"Wrote PID {pid} to {pid_file}")
     return pid_file
@@ -117,23 +138,21 @@ def write_pid(role: str, pid: int) -> Path:
 
 def read_pid(role: str) -> int | None:
     """Read PID for an agent, returns None if not running."""
-    pid_file = PIDS_DIR / f"{role}.pid"
+    pid_file = _pids_dir() / f"{role}.pid"
     if not pid_file.exists():
         return None
     try:
         pid = int(pid_file.read_text().strip())
-        # Check if process is still running
-        os.kill(pid, 0)  # Signal 0 just checks if process exists
+        os.kill(pid, 0)
         return pid
     except (ValueError, ProcessLookupError, PermissionError):
-        # Invalid PID or process not running
         pid_file.unlink(missing_ok=True)
         return None
 
 
 def clear_pid(role: str) -> None:
     """Remove PID file for an agent."""
-    pid_file = PIDS_DIR / f"{role}.pid"
+    pid_file = _pids_dir() / f"{role}.pid"
     if pid_file.exists():
         pid_file.unlink()
         log(f"Cleared PID file for {role}")
@@ -194,7 +213,7 @@ AGENT_PERMISSIONS = {
     "implementer": {
         "allowed_tools": ["Read", "Write", "Edit", "Glob", "Grep"],
         "can_write": True,
-        "description": "Can read/write/edit files in their workspace",
+        "description": "Can read/write/edit files in the project",
     },
     "reviewer": {
         "allowed_tools": ["Read", "Glob", "Grep", "Write"],
@@ -232,139 +251,59 @@ def log_separator(title: str = "NEW RUN"):
     f.flush()
 
 
-def init_workspace():
-    """Initialize the workspace as a git repo if needed."""
-    workspace = get_workspace_dir()
-    workspace.mkdir(parents=True, exist_ok=True)
-    git_dir = workspace / ".git"
-    if not git_dir.exists():
-        log(f"Initializing workspace git repo at {workspace}")
-        git_cmd(["init"], workspace)
-        (workspace / ".gitkeep").touch()
-        git_cmd(["add", ".gitkeep"], workspace)
-        git_cmd(["commit", "-m", "Initialize workspace"], workspace)
-        log("Workspace initialized")
-
-
-def setup_agent_branch(role: str) -> Path:
+def setup_agent_workspace(role: str) -> Path:
     """
-    Set up agent's workspace subdirectory and git branch.
-    Returns the agent's workspace directory.
+    Create agent's artifact directory under .sdlc-loop/.
+    Returns the agent's artifact directory.
     """
-    init_workspace()
-    workspace = get_workspace_dir()
-
-    # Create agent's subdirectory
-    agent_workspace = workspace / role
-    agent_workspace.mkdir(parents=True, exist_ok=True)
-    log(f"Agent workspace: {agent_workspace}")
-
-    # Check if branch exists
-    result = git_cmd(["branch", "--list", role], workspace)
-    branch_exists = role in result.stdout
-
-    if not branch_exists:
-        log(f"Creating new branch: {role}")
-        git_cmd(["checkout", "-b", role], workspace)
-    else:
-        log(f"Checking out existing branch: {role}")
-        git_cmd(["checkout", role], workspace)
-
-    # Merge latest from target branch
-    log(f"Merging latest from {_target_branch} into {role}")
-    result = git_cmd(["merge", _target_branch, "--no-edit"], workspace)
-    if result.returncode != 0:
-        log(f"Merge warning: {result.stderr}", "WARN")
-
-    return agent_workspace
+    artifact_dir = get_artifacts_dir() / role
+    artifact_dir.mkdir(parents=True, exist_ok=True)
+    log(f"Agent artifact dir: {artifact_dir}")
+    return artifact_dir
 
 
 def commit_agent_work(role: str, message: str) -> bool:
-    """Commit any changes the agent made."""
-    workspace = get_workspace_dir()
-    log(f"Checking for changes in {role}/")
-
-    # Stage changes in agent's directory
-    git_cmd(["add", role + "/"], workspace)
-
-    # Source-modifying agents (implementer, tester) run in the workspace root
-    # and edit files outside their subdirectory. Stage all changes so source
-    # edits are captured in the agent's commit, but exclude other agents'
-    # subdirectories to avoid pulling in their uncommitted work.
+    """Commit any code changes the agent made (artifacts are gitignored)."""
     source_modifying_roles = {"implementer", "tester"}
-    if role in source_modifying_roles:
-        log(f"Staging source changes for {role}")
-        other_agent_dirs = [r for r in AGENT_PERMISSIONS if r != role]
-        pathspec = ["--", "."] + [f":!{d}/" for d in other_agent_dirs]
-        git_cmd(["add"] + pathspec, workspace)
+    if role not in source_modifying_roles:
+        return False
 
-    # Check if there are changes to commit
-    result = git_cmd(["diff", "--cached", "--quiet"], workspace)
+    repo = get_repo_root()
+    log(f"Staging source changes for {role}")
+
+    git_cmd(["add", "--", ".", ":!.sdlc-loop/"], repo)
+
+    result = git_cmd(["diff", "--cached", "--quiet"], repo)
     if result.returncode == 0:
         log(f"No changes to commit for {role}")
-        return False  # No changes
+        return False
 
-    # Commit
     log(f"Committing changes for {role}: {message}")
-    git_cmd(["commit", "-m", f"[{role}] {message}"], workspace)
+    git_cmd(["commit", "-m", f"[{role}] {message}"], repo)
     return True
 
 
-def merge_to_main(role: str) -> bool:
-    """Merge agent's branch back to the target branch."""
-    workspace = get_workspace_dir()
-    log(f"Merging {role} branch back to {_target_branch}")
-
-    # Switch to target branch
-    git_cmd(["checkout", _target_branch], workspace)
-
-    # Merge agent's branch
-    result = git_cmd(["merge", role, "--no-edit"], workspace)
-    if result.returncode == 0:
-        log(f"Successfully merged {role} to {_target_branch}")
-        return True
-
-    # Merge failed — abort and retry with theirs strategy for source-modifying agents
-    log(f"Merge failed: {result.stderr}", "ERROR")
-    git_cmd(["merge", "--abort"], workspace)
-
-    source_modifying_roles = {"implementer", "tester"}
-    if role in source_modifying_roles:
-        log(f"Retrying merge with -X theirs for {role} (source changes take priority)")
-        result = git_cmd(["merge", role, "--no-edit", "-X", "theirs"], workspace)
-        if result.returncode == 0:
-            log(f"Successfully merged {role} to {_target_branch} with -X theirs")
-            return True
-        log(f"Merge with -X theirs also failed: {result.stderr}", "ERROR")
-        git_cmd(["merge", "--abort"], workspace)
-
-    return False
-
-
 def get_workspace_context(role: str) -> str:
-    """Read relevant files from workspace to provide context to the agent."""
-    workspace = get_workspace_dir()
+    """Read relevant files from .sdlc-loop/artifacts/ to provide context to the agent."""
+    artifacts = get_artifacts_dir()
     context_parts = []
 
-    # Read shared files from main workspace
     shared_files = ["TASK.md", "SHARED_UNDERSTANDING.md", "CUMULATIVE_UNDERSTANDING.md"]
     for filename in shared_files:
-        filepath = workspace / filename
+        filepath = artifacts / filename
         if filepath.exists():
-            content = filepath.read_text()[:3000]  # Limit size
+            content = filepath.read_text()[:3000]
             context_parts.append(f"## {filename}\n\n{content}")
 
-    # Read files from other agents' directories (for context)
     agent_order = ["planner", "implementer", "reviewer", "tester", "user"]
     for agent in agent_order:
         if agent == role:
-            break  # Only read from previous agents
-        agent_dir = workspace / agent
+            break
+        agent_dir = artifacts / agent
         if agent_dir.exists():
-            for f in sorted(agent_dir.glob("*.md"))[:3]:  # Limit files
+            for f in sorted(agent_dir.glob("*.md"))[:3]:
                 content = f.read_text()[:2000]
                 context_parts.append(f"## {agent}/{f.name}\n\n{content}")
-            # Also read code files from implementer
             if agent == "implementer":
                 for f in sorted(agent_dir.glob("*.py"))[:3]:
                     content = f.read_text()[:3000]
@@ -382,26 +321,23 @@ def run_agent(
     Run a claude prompt as a specific agent role.
 
     Each role has:
-    - Session directory (agents/{workspace}/{role}/) for conversation isolation
-    - Workspace subdirectory (workspaces/{workspace}/{role}/) for file operations
-    - Git branch for version control
+    - Session directory (.sdlc-loop/agents/{role}/) for conversation isolation
+    - Artifact directory (.sdlc-loop/artifacts/{role}/) for SDLC outputs
+    - Source-modifying agents work in the project root directly
     """
-    workspace = get_workspace_dir()
+    repo = get_repo_root()
     agents_dir = get_agents_dir()
 
     log(f"{'='*50}")
     log(f"Starting agent: {role.upper()}")
     log(f"{'='*50}")
 
-    # Set up session directory (for conversation isolation)
     agent_session_dir = agents_dir / role
     agent_session_dir.mkdir(parents=True, exist_ok=True)
     log(f"Session directory: {agent_session_dir}")
 
-    # Set up workspace and git branch
-    agent_workspace = setup_agent_branch(role)
+    agent_artifact_dir = setup_agent_workspace(role)
 
-    # Get permissions
     permissions = AGENT_PERMISSIONS.get(
         role,
         {
@@ -412,7 +348,6 @@ def run_agent(
     )
     log(f"Permissions: {permissions['allowed_tools']}")
 
-    # Get context from workspace
     log(f"Gathering workspace context for {role}")
     workspace_context = get_workspace_context(role)
     if workspace_context:
@@ -420,11 +355,9 @@ def run_agent(
     else:
         log("No prior context found")
 
-    # Determine working directory before building prompt so it can be referenced
     source_modifying_roles = {"implementer", "tester"}
-    agent_cwd = workspace if role in source_modifying_roles else agent_session_dir
+    agent_cwd = repo if role in source_modifying_roles else agent_session_dir
 
-    # Build enhanced prompt with context
     full_prompt = message
     if workspace_context:
         full_prompt = f"""## WORKSPACE CONTEXT
@@ -438,30 +371,24 @@ The following files are available from previous stages:
 ## YOUR TASK
 
 {message}
-
----
-
-Your workspace directory is: {agent_workspace}
-Write any output files to this directory.
-
-IMPORTANT: Your working directory is {agent_cwd}. Only modify files within this directory.
-Do NOT modify files outside this directory (e.g. in the original source repo).
 """
 
-    # Build command
+    full_prompt += f"""
+You are working directly in the project at: {repo}
+Write any SDLC output files (plans, reviews, reports) to: {agent_artifact_dir}
+Your working directory is {agent_cwd}.
+"""
+
     cmd = ["claude", "-p", full_prompt]
 
     if continue_session:
         cmd.append("-c")
 
-    # Add allowed tools
     if "allowed_tools" in permissions:
         cmd.extend(["--allowedTools", ",".join(permissions["allowed_tools"])])
 
-    # Add workspace directory for file access
-    cmd.extend(["--add-dir", str(workspace)])
+    cmd.extend(["--add-dir", str(repo)])
 
-    # Remove CLAUDECODE env var to allow running from within Claude Code
     env = os.environ.copy()
     env.pop("CLAUDECODE", None)
 
@@ -471,7 +398,6 @@ Do NOT modify files outside this directory (e.g. in the original source repo).
     )
     log(f"Working directory: {agent_cwd}")
 
-    # Use Popen to capture PID for monitoring/killing
     process = subprocess.Popen(
         cmd,
         stdout=subprocess.PIPE,
@@ -481,20 +407,17 @@ Do NOT modify files outside this directory (e.g. in the original source repo).
         cwd=agent_cwd,
     )
 
-    # Write PID file so we can kill if needed
     write_pid(role, process.pid)
 
     try:
         stdout, stderr = process.communicate()
         returncode = process.returncode
     finally:
-        # Always clean up PID file when done
         clear_pid(role)
 
     log(f"Claude returned with code {returncode}")
     output = stdout.strip()
 
-    # Update result references for rest of function
     class Result:
         pass
 
@@ -509,11 +432,10 @@ Do NOT modify files outside this directory (e.g. in the original source repo).
             "WARN" if result.returncode == 0 else "ERROR",
         )
 
-    # Auto-commit if agent has write permissions
     if auto_commit and permissions.get("can_write"):
         committed = commit_agent_work(role, f"Work from {role}")
         if committed:
-            output += f"\n\n[Committed changes to {role} branch]"
+            output += f"\n\n[Committed code changes from {role}]"
 
     if result.returncode != 0 and result.stderr:
         log(f"Agent {role} failed", "ERROR")
@@ -522,11 +444,6 @@ Do NOT modify files outside this directory (e.g. in the original source repo).
     log(f"Agent {role} completed successfully")
     log(f"Output length: {len(output)} chars")
     return output
-
-
-def finalize_agent(role: str) -> bool:
-    """Merge agent's work back to main branch."""
-    return merge_to_main(role)
 
 
 def reset_agent(role: str) -> None:
@@ -551,17 +468,8 @@ def show_permissions():
         print(f"\n{role}:")
         print(f"  Tools: {tools}")
         print(f"  Can Write: {can_write}")
-        print(f"  Workspace: workspace/{role}/")
+        print(f"  Artifacts: .sdlc-loop/artifacts/{role}/")
         print(f"  {perms.get('description', '')}")
-
-
-def show_branches():
-    """Show git branches in workspace."""
-    init_workspace()
-    workspace = get_workspace_dir()
-    result = git_cmd(["branch", "-v"], workspace)
-    print(f"Workspace branches ({get_workspace_name()}):")
-    print(result.stdout)
 
 
 if __name__ == "__main__":
@@ -571,7 +479,6 @@ if __name__ == "__main__":
         print(f"Usage: {sys.argv[0]} <role> <message>")
         print(f"       {sys.argv[0]} <role> -c <message>  (continue session)")
         print(f"       {sys.argv[0]} --permissions  (show agent permissions)")
-        print(f"       {sys.argv[0]} --branches     (show workspace branches)")
         print(f"       {sys.argv[0]} --status       (show running agents)")
         print(f"       {sys.argv[0]} --kill <role>  (kill a running agent)")
         print(f"       {sys.argv[0]} --kill-all     (kill all running agents)")
@@ -587,9 +494,9 @@ if __name__ == "__main__":
             print("Error: role required for --kill")
             sys.exit(1)
         role = sys.argv[2]
-        signal_num = 15  # SIGTERM
+        signal_num = 15
         if len(sys.argv) > 3 and sys.argv[3] == "-9":
-            signal_num = 9  # SIGKILL
+            signal_num = 9
         kill_agent(role, signal_num)
         sys.exit(0)
 
@@ -604,10 +511,6 @@ if __name__ == "__main__":
 
     if sys.argv[1] == "--permissions":
         show_permissions()
-        sys.exit(0)
-
-    if sys.argv[1] == "--branches":
-        show_branches()
         sys.exit(0)
 
     role = sys.argv[1]
