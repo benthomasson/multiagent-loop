@@ -9,53 +9,51 @@ This is a multi-agent development loop that orchestrates Claude CLI instances to
 ## Commands
 
 ```bash
-# Run the full pipeline
-uv run supervisor.py "write a function to check if a number is prime"
+# Run the full pipeline (from within the target repo)
+ftl-sdlc-loop "write a function to check if a number is prime"
 
-# Named workspaces - work on existing codebases
-uv run supervisor.py --workspace iris --init-from /path/to/iris  # Clone local repo
-uv run supervisor.py --workspace iris --init-from git@github.com:user/repo.git  # Or clone URL
-uv run supervisor.py --workspace iris "add a new feature"         # Work on it
-uv run supervisor.py --workspace iris --push                      # Push changes back (archives artifacts to logs/)
-uv run supervisor.py --workspace iris --pr                        # Or create a PR
+# Point to a specific repo
+ftl-sdlc-loop --repo /path/to/myproject "add a new feature"
 
-# Feature branches - work on a branch other than main
-uv run supervisor.py --workspace feature-x --init-from /path/to/repo --branch feature-x "implement feature"
-uv run supervisor.py --workspace feature-x --branch feature-x --push  # Push to feature branch
+# Feature branches
+ftl-sdlc-loop --repo /path/to/repo --branch feature-x "implement feature"
+ftl-sdlc-loop --branch feature-x --push  # Push feature branch
+
+# Effort levels
+ftl-sdlc-loop --effort minimal "quick fix"     # ~5-15 min, skip review/user
+ftl-sdlc-loop --effort moderate "add feature"  # ~30-60 min, balanced
+ftl-sdlc-loop --effort maximum "production"    # ~2-3 hours, full pipeline
 
 # Environment variables - load secrets for agents
-uv run supervisor.py --workspace myproject --env ~/.secrets/myproject.env "build API integration"
+ftl-sdlc-loop --env ~/.secrets/myproject.env "build API integration"
 
 # Read task from file (for complex prompts)
-uv run supervisor.py --workspace myproject --prompt-file task.md
+ftl-sdlc-loop --prompt-file task.md
 
 # Plan review workflow - generate plan, review, then implement
-uv run supervisor.py --workspace myproject --plan-only "build feature X"  # Generate plan only
-uv run supervisor.py --workspace myproject --plan workspaces/myproject/PLAN.md "build feature X"  # Use existing plan
+ftl-sdlc-loop --plan-only "build feature X"              # Generate plan only
+ftl-sdlc-loop --plan .sdlc-loop/artifacts/PLAN.md "build feature X"  # Use existing plan
+
+# Push changes
+ftl-sdlc-loop --push              # Push to remote
+ftl-sdlc-loop --pr                # Create a PR
 
 # GitLab workflow - fetch issue, run pipeline, create MR
-# Direct clone from GitLab:
-uv run supervisor.py --workspace issue-285 --init-from git@gitlab.com:org/repo.git --gitlab-issue 285 --effort minimal
-# Or from local bare repo with explicit GitLab remote:
-uv run supervisor.py --workspace issue-285 --init-from ~/git/repo.git --gitlab-remote git@gitlab.com:org/repo.git --gitlab-issue 285 --effort minimal
-# Create MR after completion:
-uv run supervisor.py --workspace issue-285 --gitlab-mr --push
+ftl-sdlc-loop --gitlab-issue 285 --effort minimal
+ftl-sdlc-loop --gitlab-mr --push
 
-# GitHub workflow with code review - fix issue, create PR, review, post comment
-uv run ftl-sdlc-loop --workspace issue-29 --init-from ~/git/ftl2 --github-issue 29 --github-repo benthomasson/ftl2 --github-pr --code-review --effort moderate --no-questions --clean
+# GitHub workflow - fix issue, create PR, review
+ftl-sdlc-loop --github-issue 29 --github-repo benthomasson/ftl2 --github-pr --code-review --effort moderate --no-questions
 
 # With shared understanding from Phase 0
-uv run supervisor.py --understanding workspace/SHARED_UNDERSTANDING.md "build the feature"
+ftl-sdlc-loop --understanding .sdlc-loop/artifacts/SHARED_UNDERSTANDING.md "build the feature"
 
 # Continue previous agent conversations (for follow-up runs)
-uv run supervisor.py --continue "fix the bug from last run"
+ftl-sdlc-loop --continue "fix the bug from last run"
 
 # Continuous mode - process tasks from a queue file
-uv run supervisor.py --continuous                    # uses queue.txt
-uv run supervisor.py --continuous --queue tasks.txt  # custom queue file
-
-# Build shared understanding interactively (Phase 0)
-uv run understand.py "build a REST API for user management"
+ftl-sdlc-loop --continuous                    # uses queue.txt
+ftl-sdlc-loop --continuous --queue tasks.txt  # custom queue file
 
 # Run individual agents
 uv run agent.py planner "design a REST API"
@@ -71,11 +69,19 @@ uv run agent.py --permissions   # show agent tool permissions
 
 ## Architecture
 
-### Three Main Scripts
+### Three Main Modules
 
 - **understand.py** - Phase 0: Interactive shared understanding builder. Creates `SHARED_UNDERSTANDING.md`.
 - **supervisor.py** - Pipeline orchestrator. Runs planner→implementer→reviewer→tester→user loop until satisfied.
-- **agent.py** - Low-level agent runner. Handles session isolation, git branches, permissions, and PID tracking.
+- **agent.py** - Low-level agent runner. Handles session isolation, permissions, and PID tracking.
+
+### Working in the Code Repo
+
+Agents work **directly in the target code repository**. All SDLC state (plans, reviews, session dirs, beliefs) lives under `.sdlc-loop/` which is gitignored. This means:
+
+- No separate workspace clone — agents see the real repo
+- SDLC artifacts never enter the code repo's git history
+- Only actual code changes (from implementer/tester) are committed
 
 ### Agent Pipeline Flow
 
@@ -97,18 +103,15 @@ Planner (WHAT/WHY) → Implementer ←──┬───────────
 - Tester → Implementer: If tests fail, fix before user tries it
 
 Each agent:
-1. Checks out their git branch, merges from main
-2. Gets context from workspace files + previous agents' output
-3. Runs with specific tool permissions (`--allowedTools`)
-4. Commits to their branch, merges back to main
+1. Gets context from `.sdlc-loop/artifacts/` (previous agents' output)
+2. Runs with specific tool permissions (`--allowedTools`)
+3. Source-modifying agents (implementer, tester) commit code directly
 
 ### Key Design Patterns
 
-**Session Isolation**: Each agent runs in `agents/{workspace}/{role}/` directory. Claude CLI stores conversation history per directory, giving each agent persistent memory across iterations.
+**Session Isolation**: Each agent runs in `.sdlc-loop/agents/{role}/` directory. Claude CLI stores conversation history per directory, giving each agent persistent memory across iterations.
 
-**Workspace Separation**: Each agent writes to `workspaces/{workspace}/{role}/`. All can read all directories, but only write to their own.
-
-**Git Coordination**: Every stage commits. Agent branches prevent conflicts. Supervisor merges to main after each stage.
+**Artifact Separation**: SDLC artifacts go to `.sdlc-loop/artifacts/{role}/`. Gitignored — never enters commit history. Only source code changes are committed.
 
 **Conversation Continuation**: Iteration 2+ uses `-c` flag so agents remember previous work. `--continue` flag forces this from iteration 1.
 
@@ -153,18 +156,16 @@ Agents can request human input with markers like `QUESTION FOR HUMAN:`. Supervis
 
 ### Iteration Entries and Versioned Artifacts
 
-Each agent's output is saved with versioned filenames to preserve the full history for evaluation:
+Each agent's output is saved with versioned filenames to preserve the full history:
 
-**Entries** (raw outputs): `entries/iteration-{N}/{role}.md` or `entries/iteration-{N}/{role}_{inner}.md` for inner loops.
+**Entries** (raw outputs): `.sdlc-loop/entries/iteration-{N}/{role}.md`
 
-**Artifacts** (formatted working files):
+**Artifacts** (formatted working files under `.sdlc-loop/artifacts/`):
 - `PLAN_{iteration}.md` - Planner output per iteration
 - `IMPLEMENTATION_{iteration}_{attempt}.md` - Implementer output per attempt
 - `REVIEW_{iteration}_{attempt}.md` - Reviewer output per attempt
 - `TESTER_{iteration}_{attempt}.md` - Tester output per attempt
 - `USER_FEEDBACK_{iteration}.md` - User feedback per iteration
-
-Inner loop attempts are numbered sequentially (e.g., `IMPLEMENTATION_1_1.md`, `IMPLEMENTATION_1_2.md` for review fixes, `IMPLEMENTATION_1_4.md` for test fixes).
 
 ### Beliefs Integration
 
@@ -176,15 +177,21 @@ The supervisor uses [beliefs](https://github.com/benthomasson/beliefs) as a libr
 
 Before the user stage, `beliefs compact` is injected into context. The exit gate also checks: if the user is SATISFIED but active WARNINGs exist, it escalates to a human.
 
-## Runtime Directories (gitignored)
+## SDLC State Directory (.sdlc-loop/)
 
-- `workspaces/{name}/` - Named workspaces, each a git repo with artifacts and agent subdirectories
-  - `entries/iteration-{N}/` - Full agent outputs per iteration (planner.md, implementer.md, etc.)
-  - `beliefs.md` / `nogoods.md` - Beliefs system state
-  - `.env` - Environment variables (copied via `--env`, added to .gitignore)
-- `agents/{name}/` - Session directories per workspace for conversation isolation
-- `pids/` - PID files for running agent processes
-- `logs/` - Archived artifacts from `--push` (e.g., `iris_20260224_143052_artifacts.tar.gz`)
-- `multiagent.log` - Verbose logging output
+All SDLC state lives under `.sdlc-loop/` in the target repo (gitignored):
 
-Default workspace name is `default` if `--workspace` not specified.
+```
+.sdlc-loop/
+├── agents/{role}/          # Claude session dirs (conversation isolation)
+├── artifacts/              # SDLC documents (plans, reviews, etc.)
+│   ├── TASK.md
+│   ├── PLAN_1.md
+│   └── {role}/             # Per-agent artifact subdirs
+├── entries/iteration-{N}/  # Full agent outputs per iteration
+├── beliefs.md              # Beliefs system state
+├── nogoods.md              # Contradictions
+├── logs/                   # Archived artifacts
+├── pids/                   # PID files for running agents
+└── multiagent.log          # Verbose logging
+```

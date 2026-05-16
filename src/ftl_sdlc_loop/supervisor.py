@@ -35,19 +35,16 @@ from datetime import datetime
 from pathlib import Path
 
 from .agent import (
-    DEFAULT_WORKSPACE,
-    LOG_FILE,
-    finalize_agent,
-    get_agents_dir,
+    get_artifacts_dir,
+    get_repo_root,
+    get_sdlc_dir,
     get_target_branch,
-    get_workspace_dir,
-    get_workspace_name,
     log,
     log_separator,
     run_agent,
     set_context_dirs,
+    set_repo_root,
     set_target_branch,
-    set_workspace,
 )
 
 # Queue file handling for continuous mode
@@ -311,12 +308,13 @@ def github_fill_pr_template(
             diff_content += "\n... (diff truncated)"
         context_parts.append(f"## Git Diff\n```diff\n{diff_content}\n```")
 
-    plan_path = workspace / "PLAN.md"
+    artifacts = get_artifacts_dir()
+    plan_path = artifacts / "PLAN.md"
     if plan_path.exists():
         plan_content = plan_path.read_text()[:3000]
         context_parts.append(f"## PLAN.md\n{plan_content}")
 
-    review_path = workspace / "REVIEW.md"
+    review_path = artifacts / "REVIEW.md"
     if review_path.exists():
         review_content = review_path.read_text()[:2000]
         context_parts.append(f"## REVIEW.md\n{review_content}")
@@ -397,20 +395,21 @@ def gitlab_fill_mr_template(
             diff_content += "\n... (diff truncated)"
         context_parts.append(f"## Git Diff\n```diff\n{diff_content}\n```")
 
-    # PLAN.md
-    plan_path = workspace / "PLAN.md"
+    # PLAN.md (from artifacts)
+    artifacts = get_artifacts_dir()
+    plan_path = artifacts / "PLAN.md"
     if plan_path.exists():
         plan_content = plan_path.read_text()[:3000]
         context_parts.append(f"## PLAN.md\n{plan_content}")
 
-    # REVIEW.md
-    review_path = workspace / "REVIEW.md"
+    # REVIEW.md (from artifacts)
+    review_path = artifacts / "REVIEW.md"
     if review_path.exists():
         review_content = review_path.read_text()[:2000]
         context_parts.append(f"## REVIEW.md\n{review_content}")
 
-    # Test results if available
-    test_path = workspace / "tester" / "USAGE.md"
+    # Test results if available (from artifacts)
+    test_path = artifacts / "tester" / "USAGE.md"
     if test_path.exists():
         test_content = test_path.read_text()[:1500]
         context_parts.append(f"## Test Results\n{test_content}")
@@ -585,9 +584,15 @@ def pop_task_from_queue(queue_path: Path) -> str | None:
 
 
 def git_commit(message: str, files: list[str] | None = None) -> bool:
-    """Commit changes to git with the given message."""
+    """Commit source-code changes to git, excluding .sdlc-loop/.
+
+    Since SDLC artifacts live under .sdlc-loop/ (which is gitignored),
+    this only commits real source changes.  If there are no staged
+    changes after exclusion, it returns False.
+    """
     env = os.environ.copy()
     env.pop("CLAUDECODE", None)
+    repo = get_repo_root()
 
     try:
         # Stage files
@@ -595,14 +600,14 @@ def git_commit(message: str, files: list[str] | None = None) -> bool:
             for f in files:
                 subprocess.run(
                     ["git", "add", f],
-                    cwd=get_workspace_dir(),
+                    cwd=repo,
                     env=env,
                     capture_output=True,
                 )
         else:
             subprocess.run(
-                ["git", "add", "-A"],
-                cwd=get_workspace_dir(),
+                ["git", "add", "-A", "--", ".", ":!.sdlc-loop/"],
+                cwd=repo,
                 env=env,
                 capture_output=True,
             )
@@ -610,7 +615,7 @@ def git_commit(message: str, files: list[str] | None = None) -> bool:
         # Check if there are changes to commit
         result = subprocess.run(
             ["git", "diff", "--cached", "--quiet"],
-            cwd=get_workspace_dir(),
+            cwd=repo,
             env=env,
             capture_output=True,
         )
@@ -621,7 +626,7 @@ def git_commit(message: str, files: list[str] | None = None) -> bool:
         # Commit
         subprocess.run(
             ["git", "commit", "-m", message],
-            cwd=get_workspace_dir(),
+            cwd=repo,
             env=env,
             capture_output=True,
         )
@@ -632,11 +637,11 @@ def git_commit(message: str, files: list[str] | None = None) -> bool:
 
 
 def load_env_file(env_path: str) -> bool:
-    """Copy a .env file to the workspace and load its variables.
+    """Load environment variables from a .env file.
 
-    The .env file is copied to the workspace root and its variables are
-    loaded into os.environ so agents inherit them. The .env file is added
-    to .gitignore to prevent committing secrets.
+    Reads the file and loads its variables into os.environ so agents
+    inherit them.  If the file is inside the repo, ensures .env is in
+    .gitignore.
 
     Returns True if successful, False otherwise.
     """
@@ -645,18 +650,11 @@ def load_env_file(env_path: str) -> bool:
         print(f"Error: .env file not found: {source}")
         return False
 
-    workspace = get_workspace_dir()
-    workspace.mkdir(parents=True, exist_ok=True)
+    print(f"Loading .env from {source}")
 
-    # Copy .env to workspace
-    dest = workspace / ".env"
-    import shutil
-
-    shutil.copy2(source, dest)
-    print(f"Copied {source} to {dest}")
-
-    # Add .env to .gitignore if not already there
-    gitignore = workspace / ".gitignore"
+    # Ensure .env is in .gitignore
+    repo = get_repo_root()
+    gitignore = repo / ".gitignore"
     gitignore_content = gitignore.read_text() if gitignore.exists() else ""
     if ".env" not in gitignore_content:
         with open(gitignore, "a") as f:
@@ -667,7 +665,7 @@ def load_env_file(env_path: str) -> bool:
 
     # Parse and load the .env file
     loaded_vars = []
-    with open(dest) as f:
+    with open(source) as f:
         for line in f:
             line = line.strip()
             # Skip empty lines and comments
@@ -693,380 +691,57 @@ def load_env_file(env_path: str) -> bool:
     return True
 
 
-def init_workspace():
-    """Initialize the workspace directory, agents directory, and git repo."""
-    get_workspace_dir().mkdir(parents=True, exist_ok=True)
-    # Pre-create agents directory to ensure it exists before any agent runs
-    get_agents_dir().mkdir(parents=True, exist_ok=True)
-    git_dir = get_workspace_dir() / ".git"
-    if not git_dir.exists():
-        env = os.environ.copy()
-        env.pop("CLAUDECODE", None)
-        subprocess.run(
-            ["git", "init"], cwd=get_workspace_dir(), env=env, capture_output=True
-        )
-        # Create initial commit
-        (get_workspace_dir() / ".gitkeep").touch()
-        subprocess.run(
-            ["git", "add", ".gitkeep"],
-            cwd=get_workspace_dir(),
-            env=env,
-            capture_output=True,
-        )
-        subprocess.run(
-            ["git", "commit", "-m", "Initialize workspace"],
-            cwd=get_workspace_dir(),
-            env=env,
-            capture_output=True,
-        )
+def init_sdlc_dir():
+    """Initialize the .sdlc-loop/ directory structure in the code repo.
 
+    Creates:
+      .sdlc-loop/agents/      - per-agent session directories
+      .sdlc-loop/artifacts/    - SDLC documents (plans, reviews, etc.)
+      .sdlc-loop/entries/      - iteration-ordered entries
+      .sdlc-loop/logs/         - log files
+      .sdlc-loop/pids/         - agent PID files
 
-def init_workspace_from(source: str) -> bool:
-    """Initialize a workspace by cloning from a git repository.
-
-    Accepts either a local path or a git URL. Clones the repo into the workspace
-    directory, preserving git history and remote configuration for pushing back.
-
-    Returns True if successful, False otherwise.
+    Also ensures .sdlc-loop/ is listed in the repo's .gitignore.
     """
-    workspace = get_workspace_dir()
-    agents_dir = get_agents_dir()
+    sdlc = get_sdlc_dir()
+    for subdir in ["agents", "artifacts", "entries", "logs", "pids"]:
+        (sdlc / subdir).mkdir(parents=True, exist_ok=True)
 
-    env = os.environ.copy()
-    env.pop("CLAUDECODE", None)
-
-    # Check if workspace already exists
-    if workspace.exists() and any(workspace.iterdir()):
-        existing = list(workspace.iterdir())
-        non_meta = [f for f in existing if f.name not in [".git", ".gitkeep"]]
-        if non_meta:
-            print(f"Error: Workspace '{get_workspace_name()}' already has content.")
-            print(f"  Location: {workspace}")
-            print(f"  Files: {[f.name for f in non_meta[:5]]}")
-            return False
-
-    # Ensure parent directories exist
-    workspace.parent.mkdir(parents=True, exist_ok=True)
-    agents_dir.mkdir(parents=True, exist_ok=True)
-
-    # Determine if source is a URL or local path
-    source_str = str(source)
-    is_url = source_str.startswith(("git@", "https://", "http://", "ssh://"))
-
-    if not is_url:
-        # Local path - convert to absolute and check it exists
-        source_path = Path(source).expanduser().resolve()
-        if not source_path.exists():
-            print(f"Error: Source path does not exist: {source_path}")
-            return False
-        # Check for regular repo (.git dir) or bare repo (HEAD file directly)
-        is_git_repo = (source_path / ".git").exists() or (source_path / "HEAD").exists()
-        if not is_git_repo:
-            print(f"Error: Source path is not a git repository: {source_path}")
-            return False
-        source_str = str(source_path)
-
-    print(f"Cloning {source_str} to workspace '{get_workspace_name()}'...")
-
-    # Clone the repository
-    result = subprocess.run(
-        ["git", "clone", source_str, str(workspace)],
-        env=env,
-        capture_output=True,
-        text=True,
-    )
-
-    if result.returncode != 0:
-        print(f"Error: git clone failed: {result.stderr}")
-        return False
-
-    # Checkout the target branch (or create it if it doesn't exist)
-    target = get_target_branch()
-    # Check if branch exists on remote
-    result = subprocess.run(
-        ["git", "branch", "-r", "--list", f"origin/{target}"],
-        cwd=workspace,
-        env=env,
-        capture_output=True,
-        text=True,
-    )
-    if target != "main" and result.stdout.strip():
-        # Branch exists on remote, check it out
-        subprocess.run(
-            ["git", "checkout", target], cwd=workspace, env=env, capture_output=True
-        )
-    elif target != "main":
-        # Branch doesn't exist, create it from current HEAD
-        subprocess.run(
-            ["git", "checkout", "-b", target],
-            cwd=workspace,
-            env=env,
-            capture_output=True,
-        )
-    # else: stay on main (default after clone)
-
-    # For local repos (especially bare repos), copy their upstream remotes
-    # This allows glab to detect the GitLab project
-    if not is_url:
-        source_path = Path(source_str)
-        # Get remotes from source repo
-        remote_result = subprocess.run(
-            ["git", "remote", "-v"],
-            cwd=source_path,
-            env=env,
-            capture_output=True,
-            text=True,
-        )
-        if remote_result.returncode == 0:
-            # Parse remotes and find ones pointing to GitLab
-            for line in remote_result.stdout.strip().split("\n"):
-                if not line.strip():
-                    continue
-                parts = line.split()
-                if len(parts) >= 2:
-                    remote_name, remote_url = parts[0], parts[1]
-                    # Check if this points to GitLab (not a local path)
-                    if "gitlab" in remote_url.lower() or remote_url.startswith(
-                        ("git@", "https://", "ssh://")
-                    ):
-                        # Add this remote to workspace as "gitlab" if origin points locally
-                        existing = subprocess.run(
-                            ["git", "remote", "get-url", "gitlab"],
-                            cwd=workspace,
-                            env=env,
-                            capture_output=True,
-                        )
-                        if existing.returncode != 0:  # gitlab remote doesn't exist
-                            subprocess.run(
-                                ["git", "remote", "add", "gitlab", remote_url],
-                                cwd=workspace,
-                                env=env,
-                                capture_output=True,
-                            )
-                            print(f"  Added 'gitlab' remote: {remote_url}")
-                        break
-
-    # Strip any pre-existing SDLC artifacts from the cloned workspace
-    # This prevents dirty source repos from contaminating the workspace
-    import glob as glob_mod
-    dirty_artifacts = []
-    for pattern in ARTIFACT_PATTERNS:
-        for path in glob_mod.glob(str(workspace / pattern)):
-            dirty_artifacts.append(Path(path))
-    if dirty_artifacts:
-        for p in dirty_artifacts:
-            rel = str(p.relative_to(workspace))
-            if p.is_dir():
-                subprocess.run(["git", "rm", "-rf", rel],
-                             cwd=workspace, env=env, capture_output=True)
-            elif p.exists():
-                subprocess.run(["git", "rm", "-f", rel],
-                             cwd=workspace, env=env, capture_output=True)
-        subprocess.run(
-            ["git", "commit", "-m", "[ftl-sdlc-loop] Strip pre-existing SDLC artifacts"],
-            cwd=workspace, env=env, capture_output=True
-        )
-        print(f"  Stripped {len(dirty_artifacts)} pre-existing SDLC artifacts from clone")
-
-    print(f"Workspace '{get_workspace_name()}' cloned from {source_str}")
-    print(f"  Location: {workspace}")
-    print(f"  Branch: {target}")
-    print("  Use --push to push changes back when done")
-    return True
-
-
-ARTIFACT_PATTERNS = [
-    # Legacy non-versioned files
-    "TASK.md",
-    "PLAN.md",
-    "IMPLEMENTATION.md",
-    "REVIEW.md",
-    "USAGE.md",
-    "USER_FEEDBACK.md",
-    "FINAL_REPORT.md",
-    "CUMULATIVE_UNDERSTANDING.md",
-    # Versioned artifacts (PLAN_1.md, IMPLEMENTATION_1_2.md, etc.)
-    "PLAN_*.md",
-    "IMPLEMENTATION_*.md",
-    "REVIEW_*.md",
-    "TESTER_*.md",
-    "USER_FEEDBACK_*.md",
-    # Other patterns
-    "ITERATION_*.md",
-    "planner/",
-    "implementer/",
-    "reviewer/",
-    "user/",
-    "tester/USAGE.md",
-    "tester/*.md",  # Keep tester/test_*.py
-    "entries/iteration-*/",
-    "beliefs.md",
-    "nogoods.md",
-]
-
-
-def clean_workspace_artifacts(workspace: Path) -> None:
-    """Remove SDLC artifact files from workspace, archiving them first.
-
-    Moves any test_*.py files from tester/ to tests/ (fixing sys.path hacks),
-    archives all artifacts to logs/, then removes them from the git tree.
-    """
-    import glob
-    import tarfile
-    from datetime import datetime as dt
-
-    env = os.environ.copy()
-    env.pop("CLAUDECODE", None)
-
-    # Move tester/test_*.py to tests/ before cleanup
-    tester_dir = workspace / "tester"
-    tests_dir = workspace / "tests"
-    if tester_dir.exists():
-        test_files = list(tester_dir.glob("test_*.py"))
-        if test_files:
-            tests_dir.mkdir(parents=True, exist_ok=True)
-            for tf in test_files:
-                # Clean sys.path hacks from test files
-                content = tf.read_text()
-                cleaned_lines = []
-                for line in content.splitlines():
-                    if line.strip().startswith("sys.path.insert(") or (
-                        line.strip() == "import sys" and "sys.path.insert(" in content
-                    ):
-                        continue
-                    cleaned_lines.append(line)
-                dest = tests_dir / tf.name
-                if not dest.exists():
-                    dest.write_text("\n".join(cleaned_lines) + "\n")
-                    print(f"  Moved {tf.name} to tests/")
-                    subprocess.run(
-                        ["git", "add", str(dest.relative_to(workspace))],
-                        cwd=workspace,
-                        env=env,
-                        capture_output=True,
-                    )
-                # Remove original from tester/
-                tf.unlink()
-                subprocess.run(
-                    ["git", "rm", "-f", str(tf.relative_to(workspace))],
-                    cwd=workspace,
-                    env=env,
-                    capture_output=True,
-                )
-
-    # Find files that existed in the upstream repo before the loop started
-    # These should NOT be cleaned even if they match artifact patterns
-    upstream_files = set()
-    result = subprocess.run(
-        ["git", "log", "--diff-filter=A", "--name-only", "--pretty=format:"],
-        capture_output=True,
-        text=True,
-        cwd=workspace,
-        env=env,
-    )
-    # Files that existed before our first commit are NOT in the added-files list
-    # Simpler: check what exists on the base branch (origin/main or gitlab/main)
-    for remote in ["origin/main", "gitlab/main", "origin/master", "gitlab/master"]:
-        result = subprocess.run(
-            ["git", "ls-tree", "-r", "--name-only", remote],
-            capture_output=True,
-            text=True,
-            cwd=workspace,
-            env=env,
-        )
-        if result.returncode == 0 and result.stdout.strip():
-            upstream_files = set(result.stdout.strip().splitlines())
-            break
-
-    # Collect all artifact files that exist, excluding upstream files
-    artifact_files = []
-    for pattern in ARTIFACT_PATTERNS:
-        for path in glob.glob(str(workspace / pattern)):
-            rel = str(Path(path).relative_to(workspace))
-            # Skip files/dirs that existed in upstream
-            if rel in upstream_files:
-                continue
-            # For directories, check if any file inside existed upstream
-            if Path(path).is_dir():
-                has_upstream = any(f.startswith(rel + "/") for f in upstream_files)
-                if has_upstream:
-                    continue
-            artifact_files.append(Path(path))
-
-    if not artifact_files:
-        print("No artifacts to clean.")
-        return
-
-    # Archive before removing
-    logs_dir = Path.cwd() / "logs"
-    logs_dir.mkdir(parents=True, exist_ok=True)
-
-    timestamp = dt.now().strftime("%Y%m%d_%H%M%S")
-    workspace_name = get_workspace_name()
-    tarball_name = f"{workspace_name}_{timestamp}_artifacts.tar.gz"
-    tarball_path = logs_dir / tarball_name
-
-    print(f"Archiving {len(artifact_files)} artifact files to {tarball_path}...")
-    with tarfile.open(tarball_path, "w:gz") as tar:
-        for artifact_path in artifact_files:
-            arcname = artifact_path.relative_to(workspace)
-            if artifact_path.is_dir():
-                tar.add(artifact_path, arcname=arcname)
-            elif artifact_path.exists():
-                tar.add(artifact_path, arcname=arcname)
-    print(f"  Archived to: {tarball_path}")
-
-    # Remove artifact files from git but keep on disk
-    print(f"Cleaning {len(artifact_files)} artifact files from git...")
-    for p in artifact_files:
-        rel = str(p.relative_to(workspace))
-        if p.is_dir():
-            subprocess.run(
-                ["git", "rm", "-rf", "--cached", rel],
-                cwd=workspace,
-                env=env,
-                capture_output=True,
-            )
-        elif p.exists():
-            subprocess.run(
-                ["git", "rm", "-f", "--cached", rel],
-                cwd=workspace,
-                env=env,
-                capture_output=True,
-            )
-
-    # Remove empty tester/ directory
-    if tester_dir.exists() and not any(tester_dir.iterdir()):
-        tester_dir.rmdir()
-        subprocess.run(
-            ["git", "rm", "-rf", "tester"], cwd=workspace, env=env, capture_output=True
-        )
+    # Ensure .sdlc-loop/ is gitignored
+    repo = get_repo_root()
+    gitignore = repo / ".gitignore"
+    gitignore_content = gitignore.read_text() if gitignore.exists() else ""
+    if ".sdlc-loop/" not in gitignore_content:
+        with open(gitignore, "a") as f:
+            if gitignore_content and not gitignore_content.endswith("\n"):
+                f.write("\n")
+            f.write(".sdlc-loop/\n")
+        print("Added .sdlc-loop/ to .gitignore")
 
 
 def push_workspace(
     branch: str = "main", create_pr: bool = False, squash: bool = True
 ) -> bool:
-    """Push workspace changes back to the remote repository.
+    """Push repo changes to the remote.
 
-    Cleans up artifact files, squashes commits, and pushes.
-    Optionally creates a pull request instead of pushing directly.
+    Squashes commits and pushes.  SDLC artifacts are already gitignored
+    so no cleanup is needed.  Optionally creates a pull request instead
+    of pushing directly.
 
     Returns True if successful, False otherwise.
     """
-    workspace = get_workspace_dir()
+    repo = get_repo_root()
     env = os.environ.copy()
     env.pop("CLAUDECODE", None)
 
-    if not workspace.exists() or not (workspace / ".git").exists():
-        print(f"Error: Workspace '{get_workspace_name()}' is not a git repository")
+    if not repo.exists() or not (repo / ".git").exists():
+        print(f"Error: {repo} is not a git repository")
         return False
 
-    # Read task description before cleanup deletes TASK.md
-    # Format is: "# Task\n\n{description}\n\nStarted: {timestamp}"
-    task_file = workspace / "TASK.md"
+    # Read task description from artifacts
+    task_file = get_artifacts_dir() / "TASK.md"
     if task_file.exists():
         lines = task_file.read_text().strip().splitlines()
-        # Skip header and blank lines, stop before "Started:" metadata
         desc_lines = [
             l
             for l in lines
@@ -1076,31 +751,10 @@ def push_workspace(
     else:
         task_desc = "ftl-sdlc-loop changes"
 
-    clean_workspace_artifacts(workspace)
-
-    # Check for any uncommitted changes (including deletions)
-    result = subprocess.run(
-        ["git", "status", "--porcelain"],
-        cwd=workspace,
-        env=env,
-        capture_output=True,
-        text=True,
-    )
-    if result.stdout.strip():
-        subprocess.run(
-            ["git", "add", "-A"], cwd=workspace, env=env, capture_output=True
-        )
-        subprocess.run(
-            ["git", "commit", "-m", "[ftl-sdlc-loop] Clean up artifacts"],
-            cwd=workspace,
-            env=env,
-            capture_output=True,
-        )
-
     # Get current branch
     result = subprocess.run(
         ["git", "branch", "--show-current"],
-        cwd=workspace,
+        cwd=repo,
         env=env,
         capture_output=True,
         text=True,
@@ -1110,7 +764,7 @@ def push_workspace(
     # Find the original commit before ftl-sdlc-loop started
     result = subprocess.run(
         ["git", "log", "--oneline", f"origin/{branch}..HEAD"],
-        cwd=workspace,
+        cwd=repo,
         env=env,
         capture_output=True,
         text=True,
@@ -1119,10 +773,9 @@ def push_workspace(
 
     if squash and commit_count > 1:
         print(f"Squashing {commit_count} commits...")
-        # Soft reset to origin and recommit
         subprocess.run(
             ["git", "reset", "--soft", f"origin/{branch}"],
-            cwd=workspace,
+            cwd=repo,
             env=env,
             capture_output=True,
         )
@@ -1131,28 +784,27 @@ def push_workspace(
                 "git",
                 "commit",
                 "-m",
-                f"{task_desc}\n\nCo-Authored-By: Claude Opus 4.5 <noreply@anthropic.com>",
+                f"{task_desc}\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>",
             ],
-            cwd=workspace,
+            cwd=repo,
             env=env,
             capture_output=True,
         )
 
-    # Check if there are actual changes after cleanup
+    # Check if there are actual changes
     diff_check = subprocess.run(
         ["git", "diff", "--stat", f"origin/{branch}..HEAD"],
-        cwd=workspace, env=env, capture_output=True, text=True
+        cwd=repo, env=env, capture_output=True, text=True
     )
     if not diff_check.stdout.strip():
-        print("No code changes to push — only SDLC artifacts were present.")
+        print("No code changes to push.")
         return False
 
     if create_pr:
-        # Push the working branch and create a PR
         print(f"Pushing {current_branch} branch...")
         result = subprocess.run(
             ["git", "push", "-u", "origin", current_branch],
-            cwd=workspace,
+            cwd=repo,
             env=env,
             capture_output=True,
             text=True,
@@ -1164,7 +816,7 @@ def push_workspace(
         print("Creating pull request...")
         result = subprocess.run(
             ["gh", "pr", "create", "--fill", "--base", branch],
-            cwd=workspace,
+            cwd=repo,
             env=env,
             capture_output=True,
             text=True,
@@ -1177,14 +829,13 @@ def push_workspace(
         print(f"Pull request created: {result.stdout.strip()}")
         return True
     else:
-        # Merge into target branch and push directly
         print(f"Merging {current_branch} into {branch}...")
         subprocess.run(
-            ["git", "checkout", branch], cwd=workspace, env=env, capture_output=True
+            ["git", "checkout", branch], cwd=repo, env=env, capture_output=True
         )
         result = subprocess.run(
             ["git", "merge", current_branch, "--no-edit"],
-            cwd=workspace,
+            cwd=repo,
             env=env,
             capture_output=True,
             text=True,
@@ -1196,7 +847,7 @@ def push_workspace(
         print(f"Pushing to origin/{branch}...")
         result = subprocess.run(
             ["git", "push", "origin", branch],
-            cwd=workspace,
+            cwd=repo,
             env=env,
             capture_output=True,
             text=True,
@@ -1210,8 +861,17 @@ def push_workspace(
 
 
 def save_artifact(name: str, content: str) -> Path:
-    """Save an artifact to the workspace."""
-    path = get_workspace_dir() / name
+    """Save an artifact to .sdlc-loop/artifacts/."""
+    path = get_artifacts_dir() / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    return path
+
+
+def save_source_file(name: str, content: str) -> Path:
+    """Save extracted source code to the repo root (not artifacts)."""
+    path = get_repo_root() / name
+    path.parent.mkdir(parents=True, exist_ok=True)
     path.write_text(content)
     return path
 
@@ -1323,7 +983,7 @@ def save_entry(
         content: Content to save
         inner: Inner loop iteration (for reviewer/implementer cycles)
     """
-    entry_dir = get_workspace_dir() / "entries" / f"iteration-{iteration}"
+    entry_dir = get_sdlc_dir() / "entries" / f"iteration-{iteration}"
     entry_dir.mkdir(parents=True, exist_ok=True)
     if inner is not None:
         path = entry_dir / f"{role}_{inner}.md"
@@ -1340,29 +1000,22 @@ from beliefs_lib.parser import append_claim, parse_nogoods, parse_registry
 
 
 def _beliefs_registry_path() -> Path:
-    return get_workspace_dir() / "beliefs.md"
+    return get_sdlc_dir() / "beliefs.md"
 
 
 def _beliefs_nogoods_path() -> Path:
-    return get_workspace_dir() / "nogoods.md"
+    return get_sdlc_dir() / "nogoods.md"
 
 
 def beliefs_init():
-    """Initialize beliefs.md and nogoods.md in the workspace if they don't exist."""
+    """Initialize beliefs.md and nogoods.md under .sdlc-loop/ if they don't exist."""
     registry = _beliefs_registry_path()
     nogoods = _beliefs_nogoods_path()
-    created = False
+    registry.parent.mkdir(parents=True, exist_ok=True)
     if not registry.exists():
         registry.write_text("# Beliefs Registry\n\n## Repos\n\n")
-        created = True
     if not nogoods.exists():
         nogoods.write_text("# Nogoods\n\n")
-        created = True
-    if created:
-        git_commit(
-            "[supervisor] Initialize beliefs registry",
-            files=["beliefs.md", "nogoods.md"],
-        )
 
 
 def beliefs_add(
@@ -1498,12 +1151,11 @@ QUESTION FOR HUMAN: [your question here]"""
         "planner", prompt, continue_session=(continue_conversations or iteration > 1)
     )
 
-    # Save plan to workspace (versioned by iteration)
+    # Save plan to artifacts (versioned by iteration)
     save_artifact(
         f"PLAN_{iteration}.md",
         f"# Plan (Iteration {iteration})\n\nTask: {task}\n\n{response}",
     )
-    git_commit(f"[planner] Plan for: {task[:50]}...")
 
     return {
         "output": response,
@@ -1532,13 +1184,13 @@ Address the reviewer's concerns in your implementation.
 """
 
     # Phase 1: Make the actual changes — no prose, just tool calls
-    workspace = get_workspace_dir()
+    repo = get_repo_root()
     implement_prompt = f"""You are a software implementer. Your ONLY job right now is to
 make code changes using the Edit and Write tools. Do NOT write prose or
 documentation. Do NOT create markdown files. Just find the files and edit them.
 
-You are running in the SOURCE TREE of the project at: {workspace}
-IMPORTANT: Only modify files inside {workspace}. Do NOT modify files outside this directory.
+You are running in the SOURCE TREE of the project at: {repo}
+IMPORTANT: Only modify files inside {repo}. Do NOT modify files outside this directory.
 
 Steps:
 1. Use Glob/Grep to find the files mentioned in the plan
@@ -1562,6 +1214,7 @@ QUESTION FOR HUMAN: [your question here]"""
         "implementer",
         implement_prompt,
         continue_session=(continue_conversations or iteration > 1),
+        auto_commit=False,
     )
 
     # Phase 2: Describe what was done (continue session so it has context)
@@ -1572,7 +1225,7 @@ what changes you made in each one. Include a self-review:
 3. What was unclear in the plan?
 4. Any concerns for the reviewer?"""
 
-    response = run_agent("implementer", describe_prompt, continue_session=True)
+    response = run_agent("implementer", describe_prompt, continue_session=True, auto_commit=False)
 
     # Extract and save code blocks
     # Supports multiple formats:
@@ -1590,7 +1243,7 @@ what changes you made in each one. Include a self-review:
         re.DOTALL,
     )
     for lang, filename, code in pattern1:
-        save_artifact(filename.strip(), code.strip())
+        save_source_file(filename.strip(), code.strip())
         files_created.append(filename.strip())
 
     # Pattern 2: **File: `filename.py`** followed by ```\ncode```
@@ -1601,7 +1254,7 @@ what changes you made in each one. Include a self-review:
     )
     for filename, code in pattern2:
         if filename not in files_created:
-            save_artifact(filename.strip(), code.strip())
+            save_source_file(filename.strip(), code.strip())
             files_created.append(filename.strip())
 
     # Pattern 3: # filename.py as first line in code block
@@ -1612,7 +1265,7 @@ what changes you made in each one. Include a self-review:
     )
     for filename, code in pattern3:
         if filename not in files_created:
-            save_artifact(filename.strip(), code.strip())
+            save_source_file(filename.strip(), code.strip())
             files_created.append(filename.strip())
 
     # files_created is already populated above
@@ -1691,9 +1344,6 @@ QUESTION FOR HUMAN: [your question here]"""
         "reviewer", prompt, continue_session=(continue_conversations or iteration > 1)
     )
 
-    # Note: versioned artifact save happens in run_iteration()
-    git_commit("[reviewer] Code review complete")
-
     verdict = parse_verdict(response)
     verdict = apply_exit_gate(verdict, "reviewer")
 
@@ -1716,13 +1366,13 @@ def tester(
     Provides usage instructions to the User agent.
     Includes self-review.
     """
-    workspace = get_workspace_dir()
+    repo = get_repo_root()
     prompt = f"""You are a QA tester. Your job is to:
 1. Create tests for this implementation
 2. Document HOW TO USE the software for the User
 
-You are running in the SOURCE TREE of the project at: {workspace}
-IMPORTANT: Only modify files inside {workspace}. Do NOT modify files outside this directory.
+You are running in the SOURCE TREE of the project at: {repo}
+IMPORTANT: Only modify files inside {repo}. Do NOT modify files outside this directory.
 
 Test files should be created alongside the existing test infrastructure — use Glob to find
 where existing tests live (e.g. `**/tests/**/test_*.py`) and put new
@@ -1786,7 +1436,8 @@ If you need clarification or are blocked, escalate to a human:
 QUESTION FOR HUMAN: [your question here]"""
 
     response = run_agent(
-        "tester", prompt, continue_session=(continue_conversations or iteration > 1)
+        "tester", prompt, continue_session=(continue_conversations or iteration > 1),
+        auto_commit=False,
     )
 
     # Extract and save test files
@@ -1800,7 +1451,7 @@ QUESTION FOR HUMAN: [your question here]"""
         r"```(?:python)?\s*(test_\S+\.py)\n(.*?)```", response, re.DOTALL
     )
     for filename, code in pattern1:
-        save_artifact(filename.strip(), code.strip())
+        save_source_file(filename.strip(), code.strip())
         test_files.append(filename.strip())
 
     # Pattern 2: **File: `test_*.py`** followed by code block
@@ -1809,11 +1460,13 @@ QUESTION FOR HUMAN: [your question here]"""
     )
     for filename, code in pattern2:
         if filename.strip() not in test_files:
-            save_artifact(filename.strip(), code.strip())
+            save_source_file(filename.strip(), code.strip())
             test_files.append(filename.strip())
 
-    # Note: versioned artifact save happens in run_iteration()
-    git_commit("[tester] Tests and usage documentation")
+    if test_files:
+        git_commit(f"[tester] Tests: {', '.join(test_files)}")
+    else:
+        git_commit("[tester] Tests and usage documentation")
 
     # Determine if tests passed
     verdict = parse_verdict(response)
@@ -1904,7 +1557,6 @@ QUESTION FOR HUMAN: [your question here]"""
         f"USER_FEEDBACK_{iteration}.md",
         f"# User Feedback (Iteration {iteration})\n\n{response}",
     )
-    git_commit("[user] User feedback and feature requests")
 
     verdict = parse_verdict(response)
     verdict = apply_exit_gate(verdict, "user")
@@ -1919,20 +1571,13 @@ QUESTION FOR HUMAN: [your question here]"""
 def process_agent_output(
     agent_name: str, output: str, iteration: int, no_questions: bool = False
 ) -> str:
-    """Process agent output, checking for escalations, then merge to target branch."""
+    """Process agent output, checking for escalations."""
     escalation = check_for_escalation(output)
     if escalation:
         human_response = request_human_input(
             agent_name, escalation, iteration, no_questions
         )
         output += f"\n\n## Human Response\n\n{human_response}"
-
-    # Merge agent's branch back to target branch
-    if finalize_agent(agent_name):
-        print(f"  [Merged {agent_name} branch to {get_target_branch()}]")
-    else:
-        print(f"  [WARNING: Failed to merge {agent_name} branch to {get_target_branch()}]")
-        print(f"  Code changes from {agent_name} may be lost!")
 
     return output
 
@@ -1976,7 +1621,6 @@ def run_iteration(
             f"PLAN_{iteration}.md",
             f"# Plan (Provided, Iteration {iteration})\n\nTask: {task}\n\n{existing_plan}",
         )
-        git_commit(f"[planner] Using provided plan for: {task[:50]}...")
         save_entry(iteration, "planner", results["planner"])
         print(f"\n{results['planner'][:500]}...\n")
     else:
@@ -2355,7 +1999,6 @@ Verdict: {'SATISFIED' if results['user_satisfied'] else 'NEEDS_IMPROVEMENT'}
     summary_path = save_artifact(
         f"ITERATION_{iteration}_HUMAN_REVIEW.md", human_summary
     )
-    git_commit(f"[supervisor] Iteration {iteration} complete - ready for human review")
 
     print(f"\n{'='*60}")
     print(f"ITERATION {iteration} COMPLETE - HUMAN REVIEW REQUESTED")
@@ -2385,7 +2028,7 @@ def load_understanding(understanding_path: str | Path) -> str:
 
 def check_human_comments(iteration: int) -> str | None:
     """Check if human added comments to the review document."""
-    review_path = get_workspace_dir() / f"ITERATION_{iteration}_HUMAN_REVIEW.md"
+    review_path = get_artifacts_dir() / f"ITERATION_{iteration}_HUMAN_REVIEW.md"
     if not review_path.exists():
         return None
 
@@ -2435,7 +2078,7 @@ def request_human_input(
     print(f"\n{escalation['message']}\n")
 
     # Save escalation to file
-    escalation_path = get_workspace_dir() / f"ESCALATION_{iteration}_{agent_name}.md"
+    escalation_path = get_artifacts_dir() / f"ESCALATION_{iteration}_{agent_name}.md"
     escalation_content = f"""# Escalation from {agent_name}
 
 ## Agent's Question/Issue
@@ -2478,7 +2121,6 @@ def request_human_input(
         # Update file with response
         escalation_content += response
         escalation_path.write_text(escalation_content)
-        git_commit(f"[human] Response to {agent_name} escalation")
         return response
 
     # Check if they edited the file instead
@@ -2486,7 +2128,6 @@ def request_human_input(
     if "## Human Response" in content:
         response = content.split("## Human Response")[-1].strip()
         if response:
-            git_commit(f"[human] Response to {agent_name} escalation")
             return response
 
     return "(No response provided - agent should proceed with best judgment)"
@@ -2518,10 +2159,9 @@ def run_pipeline(
     log(f"Max iterations: {max_iterations}")
     log(f"Continue conversations: {continue_conversations}")
     log(f"Understanding path: {understanding_path}")
-    log(f"Log file: {LOG_FILE}")
 
-    # Initialize workspace with git
-    init_workspace()
+    # Initialize .sdlc-loop/ directory structure
+    init_sdlc_dir()
 
     # Initialize beliefs system if available
     beliefs_init()
@@ -2532,9 +2172,8 @@ def run_pipeline(
         shared_understanding = load_understanding(understanding_path)
         if shared_understanding:
             print(f"Loaded shared understanding from: {understanding_path}")
-            # Save to workspace for reference
+            # Save to artifacts for reference
             save_artifact("SHARED_UNDERSTANDING.md", shared_understanding)
-            git_commit("[supervisor] Import shared understanding")
         else:
             print(f"Warning: No understanding found at: {understanding_path}")
 
@@ -2543,14 +2182,14 @@ def run_pipeline(
     print(f"TASK: {task}")
     print(f"EFFORT LEVEL: {effort} - {effort_config['description']}")
     print(f"MAX ITERATIONS: {max_iterations}")
-    print(f"get_workspace_dir(): {get_workspace_dir()}")
+    print(f"Repo root: {get_repo_root()}")
+    print(f"SDLC dir: {get_sdlc_dir()}")
     print("=" * 60)
 
-    # Save task to workspace
+    # Save task to artifacts
     save_artifact(
         "TASK.md", f"# Task\n\n{task}\n\nStarted: {datetime.now().isoformat()}"
     )
-    git_commit(f"[supervisor] Start task: {task[:50]}...")
 
     # Plan-only mode: run planner and exit
     if plan_only:
@@ -2560,15 +2199,14 @@ def run_pipeline(
         )
         plan_output = plan_result["output"]
         save_artifact("PLAN.md", f"# Plan\n\nTask: {task}\n\n{plan_output}")
-        git_commit(f"[planner] Plan for: {task[:50]}...")
         print(f"\n{plan_output}\n")
         print(f"\n{'='*60}")
         print("PLAN-ONLY MODE COMPLETE")
-        print(f"Plan saved to: {get_workspace_dir() / 'PLAN.md'}")
+        print(f"Plan saved to: {get_artifacts_dir() / 'PLAN.md'}")
         print("Review the plan, then run with --plan PLAN.md to continue")
         print("=" * 60)
         return {
-            "workspace": str(get_workspace_dir()),
+            "repo": str(get_repo_root()),
             "iterations": 0,
             "final_satisfied": False,
             "plan_only": True,
@@ -2618,9 +2256,9 @@ def run_pipeline(
             user_feedback = results["user"]
 
             # Update cumulative understanding with learnings
-            cumulative_path = get_workspace_dir() / "CUMULATIVE_UNDERSTANDING.md"
+            cumulative_path = get_artifacts_dir() / "CUMULATIVE_UNDERSTANDING.md"
             iteration_understanding = (
-                get_workspace_dir() / f"ITERATION_{iteration}_UNDERSTANDING.md"
+                get_artifacts_dir() / f"ITERATION_{iteration}_UNDERSTANDING.md"
             ).read_text()
 
             if cumulative_path.exists():
@@ -2630,9 +2268,6 @@ def run_pipeline(
                 cumulative = f"# Cumulative Understanding\n\nLearnings accumulated across iterations.\n\n---\n\n{iteration_understanding}"
 
             cumulative_path.write_text(cumulative)
-            git_commit(
-                f"[supervisor] Update cumulative understanding after iteration {iteration}"
-            )
     else:
         print("\n" + "=" * 60)
         print("SUPERVISOR: Max iterations reached")
@@ -2689,9 +2324,9 @@ See `CUMULATIVE_UNDERSTANDING.md` for full learnings across all iterations.
 """
         if all_results[-1]["user_satisfied"]:
             final_summary += """The User agent is satisfied. Human should review:
-1. Generated code in workspace/
+1. Generated code in the repo
 2. Test files (test_*.py)
-3. Usage documentation (USAGE.md)
+3. SDLC artifacts in .sdlc-loop/artifacts/
 
 If changes are needed, run another iteration with feedback.
 """
@@ -2701,14 +2336,13 @@ If changes are needed, run another iteration with feedback.
 2. Provide additional context/understanding
 3. Manually address the remaining issues
 
-To continue: `uv run supervisor.py --understanding workspace/ "task" --max-iterations N`
+To continue: `uv run supervisor.py --understanding .sdlc-loop/artifacts/ "task" --max-iterations N`
 """
 
     save_artifact("FINAL_REPORT.md", final_summary)
-    git_commit(f"[supervisor] Task {final_status.lower()} - final report ready")
 
     print(f"\n{'='*60}")
-    print("FINAL REPORT: workspace/FINAL_REPORT.md")
+    print(f"FINAL REPORT: {get_artifacts_dir() / 'FINAL_REPORT.md'}")
     print(f"{'='*60}")
 
     return {
@@ -2716,7 +2350,7 @@ To continue: `uv run supervisor.py --understanding workspace/ "task" --max-itera
         "iterations": len(all_results),
         "results": all_results,
         "final_satisfied": all_results[-1]["user_satisfied"] if all_results else False,
-        "workspace": str(get_workspace_dir()),
+        "repo": str(get_repo_root()),
     }
 
 
@@ -2808,7 +2442,7 @@ def main():
         print("\nOptions:")
         print("  -h, --help            Show this help message and exit")
         print("  --version             Show version and exit")
-        print("  --workspace NAME      Named workspace (default: 'default')")
+        print("  --repo PATH           Path to code repository (default: CWD)")
         print(
             "  --effort LEVEL        Effort level: minimal, moderate, maximum (default: moderate)"
         )
@@ -2824,12 +2458,9 @@ def main():
         )
         print("  --queue PATH          Path to queue file (default: queue.txt)")
         print(
-            "  --init-from PATH|URL  Clone repo into workspace (local path or git URL)"
-        )
-        print(
             "  --context-dir PATH    Add read-only reference directory for agents (repeatable)"
         )
-        print("  --env PATH            Copy .env file to workspace and load variables")
+        print("  --env PATH            Load .env file variables")
         print(
             "  --prompt-file PATH    Read task description from file instead of command line"
         )
@@ -2838,16 +2469,13 @@ def main():
         )
         print("  --plan PATH           Use existing plan file, skip planner stage")
         print(
-            "  --push                Push workspace changes (archives artifacts to logs/)"
+            "  --push                Push changes to remote"
         )
         print(
             "  --pr                  Create a GitHub pull request instead of pushing directly"
         )
         print(
             "  --no-squash           Don't squash commits when pushing (default: squash)"
-        )
-        print(
-            "  --clean               Strip SDLC artifacts before push/PR/MR (or standalone)"
         )
         print(
             "  --no-questions        Disable all interactive prompts (auto-respond with defaults)"
@@ -2875,7 +2503,7 @@ def main():
         print(
             "  --gitlab-mr           Create GitLab merge request after successful run"
         )
-        print("  --gitlab-remote URL   Add GitLab remote (for bare repo workflows)")
+        print("  --gitlab-remote URL   Add GitLab remote")
         print("\nEffort levels:")
         print("  minimal  - Fast (~5-15 min): working solution, basic tests")
         print(
@@ -2884,37 +2512,25 @@ def main():
         print("  maximum  - Production (~2-3 hours): comprehensive testing & docs")
         print("\nThe loop runs autonomously. Human reviews FINAL_REPORT.md at the end.")
         print("\nExamples:")
-        print(
-            f"  {sys.argv[0]} --workspace iris --init-from /path/to/iris  # Clone local repo"
-        )
-        print(
-            f"  {sys.argv[0]} --workspace iris --init-from git@github.com:user/repo.git"
-        )
-        print(
-            f"  {sys.argv[0]} --workspace iris 'add a new feature'        # Work on it"
-        )
-        print(
-            f"  {sys.argv[0]} --workspace iris --push                     # Push changes back"
-        )
-        print(
-            f"  {sys.argv[0]} --workspace iris --pr                       # Create a PR instead"
-        )
         print(f"  {sys.argv[0]} 'write a function to calculate fibonacci numbers'")
+        print(f"  {sys.argv[0]} --repo /path/to/myproject 'add a new feature'")
+        print(f"  {sys.argv[0]} --push                     # Push changes")
+        print(f"  {sys.argv[0]} --pr                       # Create a PR")
         print(f"  {sys.argv[0]} --max-iterations 5 'complex feature'")
         print(f"  {sys.argv[0]} --continue 'fix the bug identified in the last run'")
         print("\nGitHub workflow:")
         print(
-            f"  {sys.argv[0]} --workspace issue-42 --init-from ~/repo.git --github-issue 42"
+            f"  {sys.argv[0]} --repo ~/myproject --github-issue 42"
         )
         print(
-            f"  {sys.argv[0]} --workspace issue-42 --github-pr --push    # Push and create PR"
+            f"  {sys.argv[0]} --github-pr --push    # Push and create PR"
         )
-        print("\nGitLab workflow (bare repo):")
+        print("\nGitLab workflow:")
         print(
-            f"  {sys.argv[0]} --workspace issue-285 --init-from ~/repo.git --gitlab-remote git@gitlab.com:org/repo.git --gitlab-issue 285"
+            f"  {sys.argv[0]} --repo ~/myproject --gitlab-issue 285"
         )
         print(
-            f"  {sys.argv[0]} --workspace issue-285 --gitlab-mr --push   # Push and create MR"
+            f"  {sys.argv[0]} --gitlab-mr --push   # Push and create MR"
         )
         print("\nContinuous mode:")
         print(f"  {sys.argv[0]} --continuous")
@@ -2927,112 +2543,12 @@ def main():
     if len(sys.argv) < 2:
         print(f"Usage: {sys.argv[0]} <task description> [options]")
         print(f"       {sys.argv[0]} --continuous [options]")
-        print("\nOptions:")
-        print("  --workspace NAME      Named workspace (default: 'default')")
-        print(
-            "  --effort LEVEL        Effort level: minimal, moderate, maximum (default: moderate)"
-        )
-        print(
-            "  --max-iterations N    Maximum development iterations (default: from effort level)"
-        )
-        print("  --understanding PATH  Path to understanding file or directory")
-        print(
-            "  --continue            Continue previous agent conversations (for follow-up runs)"
-        )
-        print(
-            "  --continuous          Run in continuous mode, processing tasks from a queue file"
-        )
-        print("  --queue PATH          Path to queue file (default: queue.txt)")
-        print(
-            "  --init-from PATH|URL  Clone repo into workspace (local path or git URL)"
-        )
-        print(
-            "  --context-dir PATH    Add read-only reference directory for agents (repeatable)"
-        )
-        print("  --env PATH            Copy .env file to workspace and load variables")
-        print(
-            "  --prompt-file PATH    Read task description from file instead of command line"
-        )
-        print(
-            "  --plan-only           Run planner only, save plan, and exit for review"
-        )
-        print("  --plan PATH           Use existing plan file, skip planner stage")
-        print(
-            "  --push                Push workspace changes (archives artifacts to logs/)"
-        )
-        print(
-            "  --pr                  Create a GitHub pull request instead of pushing directly"
-        )
-        print(
-            "  --no-squash           Don't squash commits when pushing (default: squash)"
-        )
-        print(
-            "  --clean               Strip SDLC artifacts before push/PR/MR (or standalone)"
-        )
-        print(
-            "  --no-questions        Disable all interactive prompts (auto-respond with defaults)"
-        )
-        print(
-            "  --branch NAME         Working branch for feature development (default: main)"
-        )
-        print("  --github-issue NUM    Fetch GitHub issue and use as task prompt")
-        print(
-            "  --github-repo SLUG    GitHub repo (owner/repo) for issue fetch (auto-detected if omitted)"
-        )
-        print("  --github-pr           Create GitHub pull request after successful run")
-        print(
-            "  --code-review         Run code-review review-loop after PR creation (requires --github-pr)"
-        )
-        print("  --beliefs PATH        Beliefs file for code-review (from code-expert)")
-        print(
-            "  --review-model NAME   Model for code-review (repeatable, default: claude + gemini)"
-        )
-        print(
-            "  --gitlab-issue NUM    Fetch GitLab issue, assign to self, use as task prompt"
-        )
-        print(
-            "  --gitlab-mr           Create GitLab merge request after successful run"
-        )
-        print("  --gitlab-remote URL   Add GitLab remote (for bare repo workflows)")
-        print("\nEffort levels:")
-        print("  minimal  - Fast (~5-15 min): working solution, basic tests")
-        print(
-            "  moderate - Balanced (~30-60 min): good practices, decent tests (default)"
-        )
-        print("  maximum  - Production (~2-3 hours): comprehensive testing & docs")
-        print("\nThe loop runs autonomously. Human reviews FINAL_REPORT.md at the end.")
+        print("\nRun with -h or --help for full options.")
         print("\nExamples:")
-        print(
-            f"  {sys.argv[0]} --workspace iris --init-from /path/to/iris  # Initialize workspace"
-        )
-        print(
-            f"  {sys.argv[0]} --workspace iris 'add a new feature'        # Work on it"
-        )
         print(f"  {sys.argv[0]} 'write a function to calculate fibonacci numbers'")
-        print(f"  {sys.argv[0]} --workspace myproject 'add a new feature'")
-        print(
-            f"  {sys.argv[0]} --understanding workspace/SHARED_UNDERSTANDING.md 'build the feature'"
-        )
-        print(
-            f"  {sys.argv[0]} --understanding ./context/ 'build feature'  # directory of docs"
-        )
-        print(f"  {sys.argv[0]} --max-iterations 5 'complex feature'")
-        print(f"  {sys.argv[0]} --continue 'fix the bug identified in the last run'")
-        print("\nGitHub workflow:")
-        print(
-            f"  {sys.argv[0]} --workspace issue-42 --init-from ~/repo.git --github-issue 42"
-        )
-        print(
-            f"  {sys.argv[0]} --workspace issue-42 --github-pr --push    # Push and create PR"
-        )
-        print("\nGitLab workflow (bare repo):")
-        print(
-            f"  {sys.argv[0]} --workspace issue-285 --init-from ~/repo.git --gitlab-remote git@gitlab.com:org/repo.git --gitlab-issue 285"
-        )
-        print("\nContinuous mode:")
+        print(f"  {sys.argv[0]} --repo /path/to/project 'add a new feature'")
+        print(f"  {sys.argv[0]} --github-issue 42")
         print(f"  {sys.argv[0]} --continuous")
-        print(f"  {sys.argv[0]} --continuous --queue my_tasks.txt")
-        print(f"  {sys.argv[0]} --continuous --max-iterations 5")
         sys.exit(1)
 
     # Parse args
@@ -3042,7 +2558,6 @@ def main():
     continue_conversations = False
     continuous_mode = False
     queue_path = DEFAULT_QUEUE_PATH
-    workspace_name = DEFAULT_WORKSPACE
     effort = "moderate"  # default effort level
     no_questions = False  # disable all user prompts
     gitlab_issue_number = None  # GitLab issue to fetch
@@ -3053,13 +2568,12 @@ def main():
     code_review = False  # Run code-review after PR creation
     beliefs_path = None  # Beliefs file for code-review
     review_models = []  # Models to use for code-review (e.g. claude, gemini)
-    init_from_path = None  # Local repo path from --init-from
-    clean_artifacts = False  # Strip SDLC artifacts before push
+    repo_path = None  # Code repo path from --repo
     branch_name = None  # Override branch name
 
-    if "--workspace" in args:
-        idx = args.index("--workspace")
-        workspace_name = args[idx + 1]
+    if "--repo" in args:
+        idx = args.index("--repo")
+        repo_path = os.path.abspath(args[idx + 1])
         args = args[:idx] + args[idx + 2 :]
 
     if "--effort" in args:
@@ -3144,11 +2658,6 @@ def main():
         review_models.append(args[idx + 1])
         args = args[:idx] + args[idx + 2 :]
 
-    if "--clean" in args:
-        idx = args.index("--clean")
-        clean_artifacts = True
-        args = args[:idx] + args[idx + 1 :]
-
     if "--branch" in args:
         idx = args.index("--branch")
         branch_name = args[idx + 1]
@@ -3161,53 +2670,47 @@ def main():
         gitlab_remote_url = args[idx + 1]
         args = args[:idx] + args[idx + 2 :]
 
-    # Set the workspace before any other operations
-    set_workspace(workspace_name)
+    # Set the repo root (defaults to CWD)
+    if repo_path:
+        set_repo_root(Path(repo_path))
 
-    # Set the target branch for agent merges (default: main)
+    # Set the target branch (default: main)
     if branch_name:
         set_target_branch(branch_name)
 
-    # Handle --init-from early (initialize workspace, then continue if task provided)
-    if "--init-from" in args:
-        idx = args.index("--init-from")
-        source = args[idx + 1]  # Can be path or URL
-        args = args[:idx] + args[idx + 2 :]
-        if os.path.isdir(source):
-            init_from_path = os.path.abspath(source)
-        success = init_workspace_from(source)
-        if not success:
-            sys.exit(1)
-        # Add GitLab remote if specified (for bare repo workflows)
-        workspace = get_workspace_dir()
-        env = os.environ.copy()
-        env.pop("CLAUDECODE", None)
-        if gitlab_remote_url:
+    # Add GitLab remote if specified
+    repo = get_repo_root()
+    env = os.environ.copy()
+    env.pop("CLAUDECODE", None)
+    if gitlab_remote_url:
+        existing = subprocess.run(
+            ["git", "remote", "get-url", "gitlab"],
+            cwd=repo, env=env, capture_output=True, text=True,
+        )
+        if existing.returncode != 0:
             subprocess.run(
                 ["git", "remote", "add", "gitlab", gitlab_remote_url],
-                cwd=workspace,
-                env=env,
-                capture_output=True,
+                cwd=repo, env=env, capture_output=True,
             )
             print(f"  Added 'gitlab' remote: {gitlab_remote_url}")
-        # If GitHub repo is specified, update origin to point to GitHub
-        # (when --init-from is a local path, origin points locally)
-        if github_issue_repo:
-            github_url = f"git@github.com:{github_issue_repo}.git"
+        elif existing.stdout.strip() != gitlab_remote_url:
+            subprocess.run(
+                ["git", "remote", "set-url", "gitlab", gitlab_remote_url],
+                cwd=repo, env=env, capture_output=True,
+            )
+            print(f"  Updated 'gitlab' remote: {gitlab_remote_url}")
+    if github_issue_repo:
+        github_url = f"git@github.com:{github_issue_repo}.git"
+        existing = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=repo, env=env, capture_output=True, text=True,
+        )
+        if existing.returncode != 0 or existing.stdout.strip() != github_url:
             subprocess.run(
                 ["git", "remote", "set-url", "origin", github_url],
-                cwd=workspace,
-                env=env,
-                capture_output=True,
+                cwd=repo, env=env, capture_output=True,
             )
             print(f"  Set origin to: {github_url}")
-        if (
-            not args
-            and not gitlab_issue_number
-            and not github_issue_number
-            and not continuous_mode
-        ):
-            sys.exit(0)
 
     # Handle --context-dir (repeatable, read-only reference directories for agents)
     context_dirs = []
@@ -3227,45 +2730,6 @@ def main():
         success = load_env_file(env_path)
         if not success:
             sys.exit(1)
-
-    # Handle --clean as standalone command (clean artifacts without pushing)
-    if (
-        clean_artifacts
-        and "--push" not in args
-        and "--pr" not in args
-        and not github_pr
-        and not gitlab_mr
-        and not github_issue_number
-        and not gitlab_issue_number
-    ):
-        workspace = get_workspace_dir()
-        if not workspace.exists() or not (workspace / ".git").exists():
-            print(f"Error: Workspace '{get_workspace_name()}' is not a git repository")
-            sys.exit(1)
-        env = os.environ.copy()
-        env.pop("CLAUDECODE", None)
-        clean_workspace_artifacts(workspace)
-        subprocess.run(
-            ["git", "add", "-A"], cwd=workspace, env=env, capture_output=True
-        )
-        result = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=workspace,
-            env=env,
-            capture_output=True,
-            text=True,
-        )
-        if result.stdout.strip():
-            subprocess.run(
-                ["git", "commit", "-m", "[ftl-sdlc-loop] Clean up SDLC artifacts"],
-                cwd=workspace,
-                env=env,
-                capture_output=True,
-            )
-            print("Committed artifact cleanup.")
-        else:
-            print("No artifacts to clean.")
-        sys.exit(0)
 
     # Handle --push and --pr early (they exit after completing)
     if "--push" in args or "--pr" in args:
@@ -3340,32 +2804,29 @@ def main():
     # Note: glab needs to run from within a git repo with GitLab remote
     gitlab_issue = None
     if gitlab_issue_number:
-        workspace = get_workspace_dir()
-        if not workspace.exists() or not (workspace / ".git").exists():
-            print(
-                "Error: Workspace must be initialized with --init-from before using --gitlab-issue"
-            )
-            print("  glab requires a git repo with GitLab remote to detect the project")
+        repo = get_repo_root()
+        if not repo.exists() or not (repo / ".git").exists():
+            print("Error: Not a git repository. Use --repo to specify a repo path.")
             sys.exit(1)
         print(f"Fetching GitLab issue #{gitlab_issue_number}...")
-        gitlab_issue = gitlab_fetch_issue(gitlab_issue_number, cwd=workspace)
+        gitlab_issue = gitlab_fetch_issue(gitlab_issue_number, cwd=repo)
         if not gitlab_issue:
             print(f"Error: Could not fetch GitLab issue #{gitlab_issue_number}")
             sys.exit(1)
         print(f"Issue: {gitlab_issue['title']}")
         # Assign to self
-        gitlab_assign_issue(gitlab_issue_number, cwd=workspace)
+        gitlab_assign_issue(gitlab_issue_number, cwd=repo)
         # Generate branch name if not specified
         if not branch_name:
             branch_name = gitlab_branch_name(gitlab_issue)
             print(f"Branch: {branch_name}")
-        # Create feature branch and set as target for agent merges
+        # Create feature branch
         set_target_branch(branch_name)
         env = os.environ.copy()
         env.pop("CLAUDECODE", None)
         subprocess.run(
             ["git", "checkout", "-B", branch_name],
-            cwd=workspace,
+            cwd=repo,
             env=env,
             capture_output=True,
         )
@@ -3373,15 +2834,13 @@ def main():
     # Handle GitHub issue - fetch and use as task
     github_issue = None
     if github_issue_number:
-        workspace = get_workspace_dir()
-        if not workspace.exists() or not (workspace / ".git").exists():
-            print(
-                "Error: Workspace must be initialized with --init-from before using --github-issue"
-            )
+        repo = get_repo_root()
+        if not repo.exists() or not (repo / ".git").exists():
+            print("Error: Not a git repository. Use --repo to specify a repo path.")
             sys.exit(1)
         print(f"Fetching GitHub issue #{github_issue_number}...")
         github_issue = github_fetch_issue(
-            github_issue_number, repo=github_issue_repo, cwd=workspace
+            github_issue_number, repo=github_issue_repo, cwd=repo
         )
         if not github_issue:
             print(f"Error: Could not fetch GitHub issue #{github_issue_number}")
@@ -3391,13 +2850,13 @@ def main():
         if not branch_name:
             branch_name = github_branch_name(github_issue)
             print(f"Branch: {branch_name}")
-        # Create feature branch and set as target for agent merges
+        # Create feature branch
         set_target_branch(branch_name)
         env = os.environ.copy()
         env.pop("CLAUDECODE", None)
         subprocess.run(
             ["git", "checkout", "-B", branch_name],
-            cwd=workspace,
+            cwd=repo,
             env=env,
             capture_output=True,
         )
@@ -3442,29 +2901,27 @@ def main():
             existing_plan=existing_plan,
         )
 
-        print(f"\nWorkspace: {result['workspace']}")
+        print(f"\nRepo: {result['repo']}")
         if result.get("plan_only"):
             print(
                 "Plan-only mode completed. Review the plan and run with --plan to continue."
             )
         else:
-            print("Run 'git log --oneline' in the workspace to see the commit history.")
+            print("Run 'git log --oneline' to see the commit history.")
 
         # Handle GitLab MR creation
         if gitlab_mr and result.get("final_satisfied"):
             print("\nCreating GitLab merge request...")
-            workspace = get_workspace_dir()
+            repo = get_repo_root()
             env = os.environ.copy()
             env.pop("CLAUDECODE", None)
 
-            # Determine branch name
             mr_branch = branch_name or "ftl-sdlc-work"
 
-            # Only create branch if pipeline ran on main (no feature branch)
             if not branch_name:
                 subprocess.run(
                     ["git", "checkout", "-B", mr_branch],
-                    cwd=workspace,
+                    cwd=repo,
                     env=env,
                     capture_output=True,
                 )
@@ -3472,7 +2929,7 @@ def main():
             # Squash all commits into one clean commit
             sq_result = subprocess.run(
                 ["git", "log", "--oneline", "origin/main..HEAD"],
-                cwd=workspace,
+                cwd=repo,
                 env=env,
                 capture_output=True,
                 text=True,
@@ -3483,7 +2940,7 @@ def main():
                 print(f"Squashing {commit_count} commits...")
                 subprocess.run(
                     ["git", "reset", "--soft", "origin/main"],
-                    cwd=workspace,
+                    cwd=repo,
                     env=env,
                     capture_output=True,
                 )
@@ -3494,20 +2951,7 @@ def main():
                 )
                 subprocess.run(
                     ["git", "commit", "-m", commit_msg],
-                    cwd=workspace,
-                    env=env,
-                    capture_output=True,
-                )
-
-            # Clean artifacts after squash (so they don't end up in the MR)
-            if clean_artifacts:
-                clean_workspace_artifacts(workspace)
-                subprocess.run(
-                    ["git", "add", "-A"], cwd=workspace, env=env, capture_output=True
-                )
-                subprocess.run(
-                    ["git", "commit", "--amend", "--no-edit"],
-                    cwd=workspace,
+                    cwd=repo,
                     env=env,
                     capture_output=True,
                 )
@@ -3516,7 +2960,7 @@ def main():
             print(f"Pushing branch {mr_branch}...")
             push_result = subprocess.run(
                 ["git", "push", "-u", "origin", mr_branch],
-                cwd=workspace,
+                cwd=repo,
                 env=env,
                 capture_output=True,
                 text=True,
@@ -3524,11 +2968,9 @@ def main():
             if push_result.returncode != 0:
                 print(f"Error pushing branch: {push_result.stderr}")
             else:
-                # Create MR
                 mr_title = gitlab_issue["title"] if gitlab_issue else task[:70]
 
-                # Check for MR template in workspace
-                mr_template_path = gitlab_find_mr_template(workspace)
+                mr_template_path = gitlab_find_mr_template(repo)
                 if mr_template_path:
                     print(f"Using MR template: {mr_template_path}")
                     template_content = mr_template_path.read_text()
@@ -3536,10 +2978,9 @@ def main():
                         template_content=template_content,
                         task=task,
                         gitlab_issue=gitlab_issue,
-                        workspace=workspace,
+                        workspace=repo,
                     )
                 else:
-                    # Fallback to simple description
                     mr_description = f"## Description\n\n{task[:500]}\n\n"
                     if gitlab_issue:
                         mr_description += f"Closes #{gitlab_issue['number']}\n\n"
@@ -3551,7 +2992,7 @@ def main():
                     description=mr_description,
                     target_branch="main",
                     assignee=gitlab_get_username(),
-                    cwd=workspace,
+                    cwd=repo,
                 )
                 if mr_url:
                     print(f"Merge request created: {mr_url}")
@@ -3561,17 +3002,16 @@ def main():
         # Handle GitHub PR creation
         if github_pr and result.get("final_satisfied"):
             print("\nCreating GitHub pull request...")
-            workspace = get_workspace_dir()
+            repo = get_repo_root()
             env = os.environ.copy()
             env.pop("CLAUDECODE", None)
 
             pr_branch = branch_name or "ftl-sdlc-work"
 
-            # Only create branch if pipeline ran on main (no feature branch)
             if not branch_name:
                 subprocess.run(
                     ["git", "checkout", "-B", pr_branch],
-                    cwd=workspace,
+                    cwd=repo,
                     env=env,
                     capture_output=True,
                 )
@@ -3579,7 +3019,7 @@ def main():
             # Squash all commits into one clean commit
             sq_result = subprocess.run(
                 ["git", "log", "--oneline", "origin/main..HEAD"],
-                cwd=workspace,
+                cwd=repo,
                 env=env,
                 capture_output=True,
                 text=True,
@@ -3590,7 +3030,7 @@ def main():
                 print(f"Squashing {commit_count} commits...")
                 subprocess.run(
                     ["git", "reset", "--soft", "origin/main"],
-                    cwd=workspace,
+                    cwd=repo,
                     env=env,
                     capture_output=True,
                 )
@@ -3601,40 +3041,24 @@ def main():
                 )
                 subprocess.run(
                     ["git", "commit", "-m", commit_msg],
-                    cwd=workspace,
+                    cwd=repo,
                     env=env,
                     capture_output=True,
                 )
 
-            # Clean artifacts after squash (so they don't end up in the PR)
-            if clean_artifacts:
-                clean_workspace_artifacts(workspace)
-                # Don't use git add -A here — it would re-add the on-disk files
-                # that git rm --cached just removed. The git rm --cached calls
-                # in clean_workspace_artifacts already staged the removals.
-                subprocess.run(
-                    ["git", "commit", "--amend", "--no-edit"],
-                    cwd=workspace,
-                    env=env,
-                    capture_output=True,
-                )
-
-            # Check if there are actual code changes after cleaning artifacts
-            # If the only changes were SDLC artifacts, the diff will be empty
+            # Check if there are actual code changes
             diff_check = subprocess.run(
                 ["git", "diff", "--stat", "origin/main..HEAD"],
-                cwd=workspace, env=env, capture_output=True, text=True
+                cwd=repo, env=env, capture_output=True, text=True
             )
             if not diff_check.stdout.strip():
-                print("No code changes after cleaning artifacts — skipping PR creation.")
-                print("The implementer may have edited files in the source repo instead of the workspace.")
-                print("Check the --init-from source repo for uncommitted changes.")
+                print("No code changes to push — skipping PR creation.")
                 return
 
             print(f"Pushing branch {pr_branch}...")
             push_result = subprocess.run(
                 ["git", "push", "-u", "origin", pr_branch],
-                cwd=workspace,
+                cwd=repo,
                 env=env,
                 capture_output=True,
                 text=True,
@@ -3644,7 +3068,7 @@ def main():
             else:
                 pr_title = github_issue["title"] if github_issue else task[:70]
                 pr_description = github_fill_pr_template(
-                    task=task, github_issue=github_issue, workspace=workspace
+                    task=task, github_issue=github_issue, workspace=repo
                 )
 
                 repo_flag = ["--repo", github_issue_repo] if github_issue_repo else []
@@ -3663,7 +3087,7 @@ def main():
                         pr_branch,
                     ]
                     + repo_flag,
-                    cwd=workspace,
+                    cwd=repo,
                     env=env,
                     capture_output=True,
                     text=True,
@@ -3682,44 +3106,7 @@ def main():
                             pr_url,
                             "--comment",
                         ]
-                        # Use init-from repo for observations (clean tree, no SDLC artifacts)
-                        # Fall back to workspace if init-from not available
-                        review_repo = init_from_path or str(workspace)
-                        if init_from_path:
-                            # Fetch and checkout the PR branch in the source repo
-                            subprocess.run(
-                                ["git", "fetch", "origin", pr_branch],
-                                cwd=init_from_path,
-                                env=env,
-                                capture_output=True,
-                            )
-                            checkout = subprocess.run(
-                                ["git", "checkout", pr_branch],
-                                cwd=init_from_path,
-                                env=env,
-                                capture_output=True,
-                            )
-                            if checkout.returncode != 0:
-                                subprocess.run(
-                                    [
-                                        "git",
-                                        "checkout",
-                                        "-b",
-                                        pr_branch,
-                                        f"origin/{pr_branch}",
-                                    ],
-                                    cwd=init_from_path,
-                                    env=env,
-                                    capture_output=True,
-                                )
-                            else:
-                                subprocess.run(
-                                    ["git", "pull", "--ff-only", "origin", pr_branch],
-                                    cwd=init_from_path,
-                                    env=env,
-                                    capture_output=True,
-                                )
-                        review_cmd.extend(["--repo", review_repo])
+                        review_cmd.extend(["--repo", str(repo)])
                         if github_issue_repo and github_issue_number:
                             issue_ref = f"https://github.com/{github_issue_repo}/issues/{github_issue_number}"
                             review_cmd.extend(["--github-issue", issue_ref])

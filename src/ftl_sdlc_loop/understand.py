@@ -26,13 +26,12 @@ import subprocess
 import sys
 from pathlib import Path
 
-WORKSPACE = Path(__file__).parent / "workspace"
+from .agent import get_artifacts_dir, get_sdlc_dir
 
 
 def run_claude(prompt: str, continue_session: bool = False) -> str:
     """Run claude -p with the understanding agent context."""
-    # Use the workspace as the context directory for session continuity
-    understand_dir = Path(__file__).parent / "agents" / "understand"
+    understand_dir = get_sdlc_dir() / "agents" / "understand"
     understand_dir.mkdir(parents=True, exist_ok=True)
 
     cmd = ["claude", "-p", prompt]
@@ -55,11 +54,10 @@ def gather_initial_context(task: str, context_sources: list[str] | None = None) 
     if context_sources:
         context_section = "\nADDITIONAL CONTEXT PROVIDED:\n"
         for source in context_sources:
-            # Check if it's a file path
             path = Path(source)
             if path.exists():
                 context_section += f"\n--- {source} ---\n"
-                context_section += path.read_text()[:5000]  # Limit size
+                context_section += path.read_text()[:5000]
                 context_section += "\n"
             else:
                 context_section += f"\n{source}\n"
@@ -206,7 +204,8 @@ Make this document useful for someone starting fresh."""
 def interactive_understanding(task: str, context_sources: list[str] | None = None):
     """Run an interactive shared understanding session."""
 
-    WORKSPACE.mkdir(exist_ok=True)
+    artifacts = get_artifacts_dir()
+    artifacts.mkdir(parents=True, exist_ok=True)
 
     print("=" * 60)
     print("SHARED UNDERSTANDING - Phase 0")
@@ -218,8 +217,7 @@ def interactive_understanding(task: str, context_sources: list[str] | None = Non
     initial_analysis = gather_initial_context(task, context_sources)
     print(f"\n{initial_analysis}\n")
 
-    # Save initial analysis
-    (WORKSPACE / "INITIAL_ANALYSIS.md").write_text(
+    (artifacts / "INITIAL_ANALYSIS.md").write_text(
         f"# Initial Analysis\n\nTask: {task}\n\n{initial_analysis}"
     )
 
@@ -234,7 +232,7 @@ def interactive_understanding(task: str, context_sources: list[str] | None = Non
         try:
             line = input()
             if line == "":
-                if lines:  # Only break if we have some input
+                if lines:
                     break
             else:
                 lines.append(line)
@@ -252,8 +250,7 @@ def interactive_understanding(task: str, context_sources: list[str] | None = Non
     validation = validate_understanding(task, initial_analysis, human_answers)
     print(f"\n{validation}\n")
 
-    # Save validation
-    (WORKSPACE / "VALIDATION.md").write_text(
+    (artifacts / "VALIDATION.md").write_text(
         f"# Validation\n\nHuman Answers:\n{human_answers}\n\n{validation}"
     )
 
@@ -262,15 +259,14 @@ def interactive_understanding(task: str, context_sources: list[str] | None = Non
     shared_doc = create_shared_understanding_doc(task, initial_analysis, validation)
     print(f"\n{shared_doc}\n")
 
-    # Save final document
-    doc_path = WORKSPACE / "SHARED_UNDERSTANDING.md"
+    doc_path = artifacts / "SHARED_UNDERSTANDING.md"
     doc_path.write_text(shared_doc)
 
     print("=" * 60)
     print(f"Shared understanding saved to: {doc_path}")
     print("=" * 60)
     print("\nNext: Run the development loop with this understanding:")
-    print(f'  uv run supervisor.py --understanding {doc_path} "{task}"')
+    print(f'  ftl-sdlc-loop --understanding {doc_path} "{task}"')
 
     return shared_doc
 
@@ -280,7 +276,8 @@ def batch_understanding(
 ):
     """Run shared understanding in batch mode with pre-provided answers."""
 
-    WORKSPACE.mkdir(exist_ok=True)
+    artifacts = get_artifacts_dir()
+    artifacts.mkdir(parents=True, exist_ok=True)
 
     answers = Path(answers_file).read_text()
 
@@ -289,21 +286,18 @@ def batch_understanding(
     print("=" * 60)
     print(f"\nTASK: {task}\n")
 
-    # Step 1: Initial analysis
     print("\n[1/3] Gathering initial context and analyzing task...")
     initial_analysis = gather_initial_context(task, context_sources)
     print(f"\n{initial_analysis}\n")
 
-    # Step 2: Validate with provided answers
     print("\n[2/3] Validating understanding with provided answers...")
     validation = validate_understanding(task, initial_analysis, answers)
     print(f"\n{validation}\n")
 
-    # Step 3: Create final document
     print("\n[3/3] Creating shared understanding document...")
     shared_doc = create_shared_understanding_doc(task, initial_analysis, validation)
 
-    doc_path = WORKSPACE / "SHARED_UNDERSTANDING.md"
+    doc_path = artifacts / "SHARED_UNDERSTANDING.md"
     doc_path.write_text(shared_doc)
 
     print(f"\nSaved to: {doc_path}")
@@ -324,7 +318,6 @@ if __name__ == "__main__":
 
     args = sys.argv[1:]
 
-    # Parse arguments
     context_sources = []
     answers_file = None
     task_parts = []

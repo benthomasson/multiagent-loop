@@ -1,8 +1,9 @@
 """Tests for commit_agent_work staging behavior.
 
 Uses real git repos in temp directories to verify that source-modifying agents
-(implementer, tester) commit source file changes, while non-source-modifying
-agents (planner, reviewer) only commit files in their own subdirectory.
+(implementer, tester) commit source file changes while excluding .sdlc-loop/,
+and non-source-modifying agents (planner, reviewer) produce no commits since
+their outputs go to gitignored .sdlc-loop/artifacts/.
 """
 
 import subprocess
@@ -27,121 +28,119 @@ def _git(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
     )
 
 
-def _init_workspace(tmp_path: Path) -> Path:
-    """Create a git repo with an initial commit and agent subdirectories."""
-    workspace = tmp_path / "workspace"
-    workspace.mkdir()
-    _git(["init"], workspace)
-    _git(["config", "user.email", "test@test"], workspace)
-    _git(["config", "user.name", "test"], workspace)
-    (workspace / "src").mkdir()
-    (workspace / "src" / "main.py").write_text("print('hello')\n")
-    for role in ("planner", "implementer", "reviewer", "tester", "user"):
-        (workspace / role).mkdir()
-    _git(["add", "-A"], workspace)
-    _git(["commit", "-m", "initial"], workspace)
-    # Create a branch for the agent to work on
-    _git(["checkout", "-b", "implementer"], workspace)
-    _git(["checkout", "-b", "tester"], workspace)
-    _git(["checkout", "-b", "planner"], workspace)
-    _git(["checkout", "main"], workspace)
-    return workspace
+def _init_repo(tmp_path: Path) -> Path:
+    """Create a git repo with source code and .sdlc-loop/ gitignored."""
+    repo = tmp_path / "repo"
+    repo.mkdir()
+    _git(["init"], repo)
+    _git(["config", "user.email", "test@test"], repo)
+    _git(["config", "user.name", "test"], repo)
+    (repo / "src").mkdir()
+    (repo / "src" / "main.py").write_text("print('hello')\n")
+    (repo / ".gitignore").write_text(".sdlc-loop/\n")
+    # Create .sdlc-loop structure
+    sdlc = repo / ".sdlc-loop"
+    (sdlc / "artifacts" / "planner").mkdir(parents=True)
+    (sdlc / "artifacts" / "implementer").mkdir(parents=True)
+    (sdlc / "artifacts" / "reviewer").mkdir(parents=True)
+    _git(["add", "-A"], repo)
+    _git(["commit", "-m", "initial"], repo)
+    return repo
 
 
-def _committed_files(workspace: Path) -> list[str]:
+def _committed_files(repo: Path) -> list[str]:
     """Return list of files changed in the last commit."""
-    result = _git(["diff", "--name-only", "HEAD~1", "HEAD"], workspace)
+    result = _git(["diff", "--name-only", "HEAD~1", "HEAD"], repo)
     return sorted(result.stdout.strip().split("\n")) if result.stdout.strip() else []
 
 
 def test_implementer_commits_source_files(tmp_path):
-    """Implementer should commit both its subdirectory files and source files."""
-    workspace = _init_workspace(tmp_path)
-    _git(["checkout", "implementer"], workspace)
+    """Implementer should commit source file changes."""
+    repo = _init_repo(tmp_path)
 
-    # Simulate implementer editing a source file and writing to its own dir
-    (workspace / "src" / "main.py").write_text("print('modified')\n")
-    (workspace / "implementer" / "notes.md").write_text("implementation notes\n")
+    (repo / "src" / "main.py").write_text("print('modified')\n")
 
-    with patch("ftl_sdlc_loop.agent.get_workspace_dir", return_value=workspace):
+    with patch("ftl_sdlc_loop.agent.get_repo_root", return_value=repo):
         from ftl_sdlc_loop.agent import commit_agent_work
 
         result = commit_agent_work("implementer", "test commit")
 
     assert result is True
-    files = _committed_files(workspace)
+    files = _committed_files(repo)
     assert "src/main.py" in files
-    assert "implementer/notes.md" in files
 
 
-def test_implementer_excludes_other_agent_dirs(tmp_path):
-    """Implementer should not stage files in other agents' subdirectories."""
-    workspace = _init_workspace(tmp_path)
-    _git(["checkout", "implementer"], workspace)
+def test_implementer_excludes_sdlc_loop(tmp_path):
+    """Implementer should not commit files under .sdlc-loop/."""
+    repo = _init_repo(tmp_path)
 
-    # Simulate another agent leaving uncommitted work
-    (workspace / "reviewer" / "REVIEW.md").write_text("review notes\n")
-    (workspace / "planner" / "PLAN.md").write_text("plan notes\n")
-    # Implementer edits source
-    (workspace / "src" / "main.py").write_text("print('modified')\n")
+    (repo / "src" / "main.py").write_text("print('modified')\n")
+    (repo / ".sdlc-loop" / "artifacts" / "implementer" / "notes.md").write_text("notes\n")
 
-    with patch("ftl_sdlc_loop.agent.get_workspace_dir", return_value=workspace):
+    with patch("ftl_sdlc_loop.agent.get_repo_root", return_value=repo):
         from ftl_sdlc_loop.agent import commit_agent_work
 
         result = commit_agent_work("implementer", "test commit")
 
     assert result is True
-    files = _committed_files(workspace)
+    files = _committed_files(repo)
     assert "src/main.py" in files
-    assert "reviewer/REVIEW.md" not in files
-    assert "planner/PLAN.md" not in files
+    for f in files:
+        assert not f.startswith(".sdlc-loop/")
 
 
 def test_tester_commits_source_files(tmp_path):
-    """Tester should commit both its subdirectory files and source files."""
-    workspace = _init_workspace(tmp_path)
-    _git(["checkout", "tester"], workspace)
+    """Tester should commit source and test file changes."""
+    repo = _init_repo(tmp_path)
+    (repo / "tests").mkdir(exist_ok=True)
 
-    (workspace / "src" / "main.py").write_text("print('tested')\n")
-    (workspace / "tester" / "report.md").write_text("test report\n")
+    (repo / "src" / "main.py").write_text("print('tested')\n")
+    (repo / "tests" / "test_main.py").write_text("def test_it(): pass\n")
 
-    with patch("ftl_sdlc_loop.agent.get_workspace_dir", return_value=workspace):
+    with patch("ftl_sdlc_loop.agent.get_repo_root", return_value=repo):
         from ftl_sdlc_loop.agent import commit_agent_work
 
         result = commit_agent_work("tester", "test commit")
 
     assert result is True
-    files = _committed_files(workspace)
+    files = _committed_files(repo)
     assert "src/main.py" in files
-    assert "tester/report.md" in files
+    assert "tests/test_main.py" in files
 
 
-def test_planner_only_commits_own_directory(tmp_path):
-    """Planner should only commit files in planner/, not source files."""
-    workspace = _init_workspace(tmp_path)
-    _git(["checkout", "planner"], workspace)
+def test_planner_returns_false(tmp_path):
+    """Planner is not a source-modifying role — commit_agent_work returns False."""
+    repo = _init_repo(tmp_path)
 
-    # Planner writes to its directory; a source file is also modified (shouldn't be staged)
-    (workspace / "planner" / "PLAN.md").write_text("the plan\n")
-    (workspace / "src" / "main.py").write_text("print('should not be committed')\n")
+    (repo / ".sdlc-loop" / "artifacts" / "planner" / "PLAN.md").write_text("the plan\n")
 
-    with patch("ftl_sdlc_loop.agent.get_workspace_dir", return_value=workspace):
+    with patch("ftl_sdlc_loop.agent.get_repo_root", return_value=repo):
         from ftl_sdlc_loop.agent import commit_agent_work
 
         result = commit_agent_work("planner", "test commit")
 
-    assert result is True
-    files = _committed_files(workspace)
-    assert "planner/PLAN.md" in files
-    assert "src/main.py" not in files
+    assert result is False
+
+
+def test_reviewer_returns_false(tmp_path):
+    """Reviewer is not a source-modifying role — commit_agent_work returns False."""
+    repo = _init_repo(tmp_path)
+
+    (repo / ".sdlc-loop" / "artifacts" / "reviewer" / "REVIEW.md").write_text("review\n")
+
+    with patch("ftl_sdlc_loop.agent.get_repo_root", return_value=repo):
+        from ftl_sdlc_loop.agent import commit_agent_work
+
+        result = commit_agent_work("reviewer", "test commit")
+
+    assert result is False
 
 
 def test_no_changes_returns_false(tmp_path):
-    """commit_agent_work should return False when there are no changes."""
-    workspace = _init_workspace(tmp_path)
-    _git(["checkout", "implementer"], workspace)
+    """commit_agent_work should return False when there are no source changes."""
+    repo = _init_repo(tmp_path)
 
-    with patch("ftl_sdlc_loop.agent.get_workspace_dir", return_value=workspace):
+    with patch("ftl_sdlc_loop.agent.get_repo_root", return_value=repo):
         from ftl_sdlc_loop.agent import commit_agent_work
 
         result = commit_agent_work("implementer", "nothing to commit")
