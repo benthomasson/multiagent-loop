@@ -867,6 +867,14 @@ def save_artifact(name: str, content: str) -> Path:
     return path
 
 
+def save_source_file(name: str, content: str) -> Path:
+    """Save extracted source code to the repo root (not artifacts)."""
+    path = get_repo_root() / name
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(content)
+    return path
+
+
 def parse_verdict(response: str) -> dict:
     """Parse a structured verdict block from agent output.
 
@@ -1233,7 +1241,7 @@ what changes you made in each one. Include a self-review:
         re.DOTALL,
     )
     for lang, filename, code in pattern1:
-        save_artifact(filename.strip(), code.strip())
+        save_source_file(filename.strip(), code.strip())
         files_created.append(filename.strip())
 
     # Pattern 2: **File: `filename.py`** followed by ```\ncode```
@@ -1244,7 +1252,7 @@ what changes you made in each one. Include a self-review:
     )
     for filename, code in pattern2:
         if filename not in files_created:
-            save_artifact(filename.strip(), code.strip())
+            save_source_file(filename.strip(), code.strip())
             files_created.append(filename.strip())
 
     # Pattern 3: # filename.py as first line in code block
@@ -1255,7 +1263,7 @@ what changes you made in each one. Include a self-review:
     )
     for filename, code in pattern3:
         if filename not in files_created:
-            save_artifact(filename.strip(), code.strip())
+            save_source_file(filename.strip(), code.strip())
             files_created.append(filename.strip())
 
     # files_created is already populated above
@@ -1440,7 +1448,7 @@ QUESTION FOR HUMAN: [your question here]"""
         r"```(?:python)?\s*(test_\S+\.py)\n(.*?)```", response, re.DOTALL
     )
     for filename, code in pattern1:
-        save_artifact(filename.strip(), code.strip())
+        save_source_file(filename.strip(), code.strip())
         test_files.append(filename.strip())
 
     # Pattern 2: **File: `test_*.py`** followed by code block
@@ -1449,7 +1457,7 @@ QUESTION FOR HUMAN: [your question here]"""
     )
     for filename, code in pattern2:
         if filename.strip() not in test_files:
-            save_artifact(filename.strip(), code.strip())
+            save_source_file(filename.strip(), code.strip())
             test_files.append(filename.strip())
 
     # Determine if tests passed

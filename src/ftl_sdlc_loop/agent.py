@@ -62,22 +62,6 @@ def get_agents_dir(workspace_name: str | None = None) -> Path:
     return get_sdlc_dir() / "agents"
 
 
-# Workspace name — kept for backward compat with supervisor references
-DEFAULT_WORKSPACE = "default"
-_current_workspace = DEFAULT_WORKSPACE
-
-
-def set_workspace(name: str) -> None:
-    """Set the current workspace name (legacy, mostly unused)."""
-    global _current_workspace
-    _current_workspace = name
-
-
-def get_workspace_name() -> str:
-    """Get the current workspace name."""
-    return _current_workspace
-
-
 # Target branch for commits (default: main)
 _target_branch = "main"
 
