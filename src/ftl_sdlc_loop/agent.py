@@ -57,6 +57,9 @@ def get_agents_dir() -> Path:
 # Target branch for commits (default: main)
 _target_branch = "main"
 
+# Additional read-only context directories (set via --context-dir)
+_context_dirs: list[str] = []
+
 
 def set_target_branch(branch: str) -> None:
     """Set the target branch for work."""
@@ -67,6 +70,17 @@ def set_target_branch(branch: str) -> None:
 def get_target_branch() -> str:
     """Get the target branch."""
     return _target_branch
+
+
+def set_context_dirs(dirs: list[str]) -> None:
+    """Set additional read-only context directories for agents."""
+    global _context_dirs
+    _context_dirs = dirs
+
+
+def get_context_dirs() -> list[str]:
+    """Get additional read-only context directories."""
+    return _context_dirs
 
 
 # Logging
@@ -334,6 +348,15 @@ def run_agent(
     source_modifying_roles = {"implementer", "tester"}
     agent_cwd = repo if role in source_modifying_roles else agent_session_dir
 
+    context_dirs = get_context_dirs()
+    ref_dirs_section = ""
+    if context_dirs:
+        dirs_list = "\n".join(f"- {d} (READ ONLY)" for d in context_dirs)
+        ref_dirs_section = f"""
+Reference directories available for reading (do NOT modify these):
+{dirs_list}
+"""
+
     full_prompt = message
     if workspace_context:
         full_prompt = f"""## WORKSPACE CONTEXT
@@ -353,7 +376,7 @@ The following files are available from previous stages:
 You are working directly in the project at: {repo}
 Write any SDLC output files (plans, reviews, reports) to: {agent_artifact_dir}
 Your working directory is {agent_cwd}.
-"""
+{ref_dirs_section}"""
 
     cmd = ["claude", "-p", full_prompt]
 
@@ -364,6 +387,9 @@ Your working directory is {agent_cwd}.
         cmd.extend(["--allowedTools", ",".join(permissions["allowed_tools"])])
 
     cmd.extend(["--add-dir", str(repo)])
+
+    for ctx_dir in context_dirs:
+        cmd.extend(["--add-dir", ctx_dir])
 
     env = os.environ.copy()
     env.pop("CLAUDECODE", None)
