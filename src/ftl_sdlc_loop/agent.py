@@ -49,7 +49,7 @@ def get_artifacts_dir() -> Path:
 
 
 
-def get_agents_dir(workspace_name: str | None = None) -> Path:
+def get_agents_dir() -> Path:
     """Get the agents session directory under .sdlc-loop/."""
     return get_sdlc_dir() / "agents"
 
@@ -270,6 +270,12 @@ def get_workspace_context(role: str) -> str:
         if filepath.exists():
             content = filepath.read_text()[:3000]
             context_parts.append(f"## {filename}\n\n{content}")
+
+    for f in sorted(artifacts.glob("*.md"))[:10]:
+        if f.name in shared_files:
+            continue
+        content = f.read_text()[:2000]
+        context_parts.append(f"## {f.name}\n\n{content}")
 
     agent_order = ["planner", "implementer", "reviewer", "tester", "user"]
     for agent in agent_order:

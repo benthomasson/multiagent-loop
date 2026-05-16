@@ -1462,6 +1462,11 @@ QUESTION FOR HUMAN: [your question here]"""
             save_source_file(filename.strip(), code.strip())
             test_files.append(filename.strip())
 
+    if test_files:
+        git_commit(f"[tester] Tests: {', '.join(test_files)}")
+    else:
+        git_commit("[tester] Tests and usage documentation")
+
     # Determine if tests passed
     verdict = parse_verdict(response)
     verdict = apply_exit_gate(verdict, "tester")
