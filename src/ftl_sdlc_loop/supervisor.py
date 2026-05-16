@@ -2664,23 +2664,34 @@ def main():
     env = os.environ.copy()
     env.pop("CLAUDECODE", None)
     if gitlab_remote_url:
-        subprocess.run(
-            ["git", "remote", "add", "gitlab", gitlab_remote_url],
-            cwd=repo,
-            env=env,
-            capture_output=True,
+        existing = subprocess.run(
+            ["git", "remote", "get-url", "gitlab"],
+            cwd=repo, env=env, capture_output=True, text=True,
         )
-        print(f"  Added 'gitlab' remote: {gitlab_remote_url}")
-    # If GitHub repo is specified, update origin
+        if existing.returncode != 0:
+            subprocess.run(
+                ["git", "remote", "add", "gitlab", gitlab_remote_url],
+                cwd=repo, env=env, capture_output=True,
+            )
+            print(f"  Added 'gitlab' remote: {gitlab_remote_url}")
+        elif existing.stdout.strip() != gitlab_remote_url:
+            subprocess.run(
+                ["git", "remote", "set-url", "gitlab", gitlab_remote_url],
+                cwd=repo, env=env, capture_output=True,
+            )
+            print(f"  Updated 'gitlab' remote: {gitlab_remote_url}")
     if github_issue_repo:
         github_url = f"git@github.com:{github_issue_repo}.git"
-        subprocess.run(
-            ["git", "remote", "set-url", "origin", github_url],
-            cwd=repo,
-            env=env,
-            capture_output=True,
+        existing = subprocess.run(
+            ["git", "remote", "get-url", "origin"],
+            cwd=repo, env=env, capture_output=True, text=True,
         )
-        print(f"  Set origin to: {github_url}")
+        if existing.returncode != 0 or existing.stdout.strip() != github_url:
+            subprocess.run(
+                ["git", "remote", "set-url", "origin", github_url],
+                cwd=repo, env=env, capture_output=True,
+            )
+            print(f"  Set origin to: {github_url}")
 
     # Handle --env early (load environment variables before running agents)
     if "--env" in args:
