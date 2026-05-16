@@ -35,8 +35,6 @@ from datetime import datetime
 from pathlib import Path
 
 from .agent import (
-    DEFAULT_WORKSPACE,
-    get_agents_dir,
     get_artifacts_dir,
     get_repo_root,
     get_sdlc_dir,
@@ -46,8 +44,6 @@ from .agent import (
     run_agent,
     set_repo_root,
     set_target_branch,
-    set_workspace,
-    setup_agent_workspace,
 )
 
 # Queue file handling for continuous mode
@@ -2431,7 +2427,6 @@ def main():
         print("  -h, --help            Show this help message and exit")
         print("  --version             Show version and exit")
         print("  --repo PATH           Path to code repository (default: CWD)")
-        print("  --workspace NAME      Named workspace (default: 'default')")
         print(
             "  --effort LEVEL        Effort level: minimal, moderate, maximum (default: moderate)"
         )
@@ -2544,7 +2539,6 @@ def main():
     continue_conversations = False
     continuous_mode = False
     queue_path = DEFAULT_QUEUE_PATH
-    workspace_name = DEFAULT_WORKSPACE
     effort = "moderate"  # default effort level
     no_questions = False  # disable all user prompts
     gitlab_issue_number = None  # GitLab issue to fetch
@@ -2561,11 +2555,6 @@ def main():
     if "--repo" in args:
         idx = args.index("--repo")
         repo_path = os.path.abspath(args[idx + 1])
-        args = args[:idx] + args[idx + 2 :]
-
-    if "--workspace" in args:
-        idx = args.index("--workspace")
-        workspace_name = args[idx + 1]
         args = args[:idx] + args[idx + 2 :]
 
     if "--effort" in args:
@@ -2661,9 +2650,6 @@ def main():
         idx = args.index("--gitlab-remote")
         gitlab_remote_url = args[idx + 1]
         args = args[:idx] + args[idx + 2 :]
-
-    # Set the workspace before any other operations
-    set_workspace(workspace_name)
 
     # Set the repo root (defaults to CWD)
     if repo_path:
