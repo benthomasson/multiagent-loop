@@ -288,7 +288,7 @@ def get_workspace_context(role: str) -> str:
     artifacts = get_artifacts_dir()
     context_parts = []
 
-    shared_files = ["TASK.md", "SHARED_UNDERSTANDING.md", "CUMULATIVE_UNDERSTANDING.md"]
+    shared_files = ["TASK.md", "PLAN.md", "SHARED_UNDERSTANDING.md", "CUMULATIVE_UNDERSTANDING.md"]
     for filename in shared_files:
         filepath = artifacts / filename
         if filepath.exists():
