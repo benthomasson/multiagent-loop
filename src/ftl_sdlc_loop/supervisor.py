@@ -1213,6 +1213,7 @@ QUESTION FOR HUMAN: [your question here]"""
         "implementer",
         implement_prompt,
         continue_session=(continue_conversations or iteration > 1),
+        auto_commit=False,
     )
 
     # Phase 2: Describe what was done (continue session so it has context)
@@ -1223,7 +1224,7 @@ what changes you made in each one. Include a self-review:
 3. What was unclear in the plan?
 4. Any concerns for the reviewer?"""
 
-    response = run_agent("implementer", describe_prompt, continue_session=True)
+    response = run_agent("implementer", describe_prompt, continue_session=True, auto_commit=False)
 
     # Extract and save code blocks
     # Supports multiple formats:
@@ -1434,7 +1435,8 @@ If you need clarification or are blocked, escalate to a human:
 QUESTION FOR HUMAN: [your question here]"""
 
     response = run_agent(
-        "tester", prompt, continue_session=(continue_conversations or iteration > 1)
+        "tester", prompt, continue_session=(continue_conversations or iteration > 1),
+        auto_commit=False,
     )
 
     # Extract and save test files

@@ -48,14 +48,6 @@ def get_artifacts_dir() -> Path:
     return get_sdlc_dir() / "artifacts"
 
 
-def get_workspace_dir(workspace_name: str | None = None) -> Path:
-    """Get the workspace directory (the code repo root).
-
-    The workspace_name parameter is accepted for backward compatibility
-    but ignored — agents always work in the repo root.
-    """
-    return get_repo_root()
-
 
 def get_agents_dir(workspace_name: str | None = None) -> Path:
     """Get the agents session directory under .sdlc-loop/."""
@@ -288,12 +280,6 @@ def get_workspace_context(role: str) -> str:
             for f in sorted(agent_dir.glob("*.md"))[:3]:
                 content = f.read_text()[:2000]
                 context_parts.append(f"## {agent}/{f.name}\n\n{content}")
-            if agent == "implementer":
-                for f in sorted(agent_dir.glob("*.py"))[:3]:
-                    content = f.read_text()[:3000]
-                    context_parts.append(
-                        f"## {agent}/{f.name}\n\n```python\n{content}\n```"
-                    )
 
     return "\n\n---\n\n".join(context_parts) if context_parts else ""
 
