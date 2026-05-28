@@ -1776,8 +1776,8 @@ def run_iteration(
             )
 
     # Stage 5: User feedback (skip if effort level is minimal or moderate)
-    # Initialize beliefs_warnings before the if/else to avoid UnboundLocalError
-    beliefs_warnings = None
+    # Initialize reasons_warnings before the if/else to avoid UnboundLocalError
+    reasons_warnings = None
 
     if skip_user:
         print("\n[5/5] USER skipped (effort level does not include user testing)")
@@ -1806,7 +1806,7 @@ def run_iteration(
             usage_for_user += f"\n\nBELIEFS STATE:\n{reasons_summary}"
 
         # Check for active warnings from reasons
-        beliefs_warnings = reasons_list_warnings()
+        reasons_warnings = reasons_list_warnings()
 
         user_result = user(
             results["implementer"],
@@ -1839,7 +1839,7 @@ def run_iteration(
             results["user_satisfied"] = False
 
     # Exit gate: SATISFIED + active beliefs WARNINGs
-    if results["user_satisfied"] and beliefs_warnings:
+    if results["user_satisfied"] and reasons_warnings:
         print(
             "  [EXIT GATE] User SATISFIED but beliefs system has active WARNINGs — escalating to human"
         )
@@ -1847,7 +1847,7 @@ def run_iteration(
             "user",
             {
                 "needs_human": True,
-                "message": f"User declared SATISFIED but beliefs system has active WARNINGs:\n{beliefs_warnings}\n\nAccept or reject?",
+                "message": f"User declared SATISFIED but beliefs system has active WARNINGs:\n{reasons_warnings}\n\nAccept or reject?",
             },
             iteration,
             no_questions,
