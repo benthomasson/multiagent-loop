@@ -219,22 +219,22 @@ def show_status() -> None:
 # Agent permissions configuration
 AGENT_PERMISSIONS = {
     "understand": {
-        "allowed_tools": ["Read", "Glob", "Grep", "Bash"],
+        "allowed_tools": ["Read", "Glob", "Grep", "Bash(reasons*)"],
         "can_write": False,
         "description": "Can read files for context gathering, query beliefs",
     },
     "planner": {
-        "allowed_tools": ["Read", "Glob", "Grep", "Write", "Bash"],
+        "allowed_tools": ["Read", "Glob", "Grep", "Write", "Bash(reasons*)"],
         "can_write": True,
         "description": "Can read codebase, writes plan, query beliefs",
     },
     "implementer": {
-        "allowed_tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
+        "allowed_tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash(reasons*)"],
         "can_write": True,
         "description": "Can read/write/edit files, query beliefs",
     },
     "reviewer": {
-        "allowed_tools": ["Read", "Glob", "Grep", "Write", "Bash"],
+        "allowed_tools": ["Read", "Glob", "Grep", "Write", "Bash(reasons*)"],
         "can_write": True,
         "description": "Can read files for review, writes review, query beliefs",
     },
