@@ -60,9 +60,6 @@ _target_branch = "main"
 # Additional read-only context directories (set via --context-dir)
 _context_dirs: list[str] = []
 
-# Reasons database path for belief queries
-_reasons_db_path: Path | None = None
-
 
 def set_target_branch(branch: str) -> None:
     """Set the target branch for work."""
@@ -86,17 +83,12 @@ def get_context_dirs() -> list[str]:
     return _context_dirs
 
 
-def set_reasons_db(path: Path) -> None:
-    """Set the reasons database path for agent prompt injection."""
-    global _reasons_db_path
-    _reasons_db_path = path
-
-
 def get_reasons_instructions() -> str:
     """Return prompt section with read-only reasons CLI commands."""
-    if _reasons_db_path is None or not _reasons_db_path.exists():
+    from .reasons import get_reasons_db
+    db = get_reasons_db()
+    if not db.exists():
         return ""
-    db = _reasons_db_path
     return f"""
 ## BELIEFS / REASONS SYSTEM
 

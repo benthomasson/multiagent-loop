@@ -2096,10 +2096,6 @@ def run_pipeline(
     # Initialize reasons database
     reasons_init()
 
-    # Set reasons DB path for agent prompt injection
-    from .agent import set_reasons_db as set_agent_reasons_db
-    set_agent_reasons_db(get_reasons_db())
-
     # Load shared understanding if provided
     shared_understanding = None
     if understanding_path:
