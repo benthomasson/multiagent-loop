@@ -2582,6 +2582,8 @@ def main():
         reasons_db_path = os.path.expanduser(args[idx + 1])
         if not os.path.isfile(reasons_db_path):
             print(f"Error: Reasons database not found: {reasons_db_path}")
+            print("  --reasons-db expects a pre-built database (e.g. from code-expert).")
+            print("  Omit this flag to auto-create a new database at .sdlc-loop/reasons.db.")
             sys.exit(1)
         args = args[:idx] + args[idx + 2 :]
 
