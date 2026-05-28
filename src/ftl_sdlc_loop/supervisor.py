@@ -1,7 +1,7 @@
 #!/usr/bin/env -S uv run
 # /// script
 # requires-python = ">=3.10"
-# dependencies = ["beliefs @ git+https://github.com/benthomasson/beliefs.git"]
+# dependencies = ["ftl-reasons"]
 # ///
 
 """
@@ -993,86 +993,16 @@ def save_entry(
     return path
 
 
-from beliefs_lib import Claim
-from beliefs_lib.check_refs import check_refs as _beliefs_check_refs
-from beliefs_lib.compact import compact as _beliefs_compact
-from beliefs_lib.parser import append_claim, parse_nogoods, parse_registry
-
-
-def _beliefs_registry_path() -> Path:
-    return get_sdlc_dir() / "beliefs.md"
-
-
-def _beliefs_nogoods_path() -> Path:
-    return get_sdlc_dir() / "nogoods.md"
-
-
-def beliefs_init():
-    """Initialize beliefs.md and nogoods.md under .sdlc-loop/ if they don't exist."""
-    registry = _beliefs_registry_path()
-    nogoods = _beliefs_nogoods_path()
-    registry.parent.mkdir(parents=True, exist_ok=True)
-    if not registry.exists():
-        registry.write_text("# Beliefs Registry\n\n## Repos\n\n")
-    if not nogoods.exists():
-        nogoods.write_text("# Nogoods\n\n")
-
-
-def beliefs_add(
-    claim_id: str, text: str, claim_type: str = "DERIVED", depends_on: str | None = None
-):
-    """Register a claim in the beliefs system."""
-    registry = _beliefs_registry_path()
-    if not registry.exists():
-        return
-    claim = Claim(
-        id=claim_id,
-        text=text,
-        type=claim_type,
-        status="IN",
-        date=datetime.now().strftime("%Y-%m-%d"),
-        depends_on=[depends_on] if depends_on else [],
-    )
-    append_claim(registry, claim)
-
-
-def beliefs_compact(budget: int = 500) -> str | None:
-    """Return a compact summary of current beliefs."""
-    registry = _beliefs_registry_path()
-    if not registry.exists():
-        return None
-    repos, claims = parse_registry(registry)
-    nogoods = (
-        parse_nogoods(_beliefs_nogoods_path())
-        if _beliefs_nogoods_path().exists()
-        else []
-    )
-    result = _beliefs_compact(claims, nogoods, budget=budget)
-    return result if result.strip() else None
-
-
-def beliefs_check_refs():
-    """Check cross-references for all claims."""
-    registry = _beliefs_registry_path()
-    if not registry.exists():
-        return
-    repos, claims = parse_registry(registry)
-    results = _beliefs_check_refs(claims, repos)
-    for claim_id, status, message in results:
-        if status != "OK":
-            print(f"  [beliefs] {claim_id}: {status} — {message}")
-
-
-def beliefs_list_warnings() -> str | None:
-    """List active WARNING claims."""
-    registry = _beliefs_registry_path()
-    if not registry.exists():
-        return None
-    repos, claims = parse_registry(registry)
-    warnings = [c for c in claims if c.type == "WARNING" and c.status == "IN"]
-    if not warnings:
-        return None
-    return "\n".join(f"- [{c.id}] {c.text}" for c in warnings)
+from .reasons import (
+    get_reasons_db,
+    reasons_add,
+    reasons_check_stale,
+    reasons_compact,
+    reasons_init,
+    reasons_list_gated,
+    reasons_list_warnings,
+    set_reasons_db,
+)
 
 
 def planner(
@@ -1638,15 +1568,15 @@ def run_iteration(
         save_entry(iteration, "planner", results["planner"])
         print(f"\n{results['planner']}\n")
 
-    # Beliefs: register planner decisions as AXIOMs
-    if _beliefs_registry_path().exists():
+    # Reasons: register planner decisions as AXIOMs
+    if get_reasons_db().exists():
         import re
 
         numbered_items = re.findall(
             r"^\d+\.\s+(.+)$", plan_result.get("output", ""), re.MULTILINE
         )
-        for i, item in enumerate(numbered_items[:5]):  # cap at 5
-            beliefs_add(f"plan-{iteration}-{i+1}", item[:200], "AXIOM")
+        for i, item in enumerate(numbered_items[:5]):
+            reasons_add(f"plan-{iteration}-{i+1}", item[:200], label="AXIOM")
 
     # Stage 2 & 3: Implementation + Review loop
     reviewer_feedback = None
@@ -1683,10 +1613,10 @@ def run_iteration(
         )
         print(f"\n{results['implementer']}\n")
 
-        # Beliefs: register implemented files as DERIVED claims
-        if _beliefs_registry_path().exists():
+        # Reasons: register implemented files as DERIVED claims
+        if get_reasons_db().exists():
             for f in results["files_created"]:
-                beliefs_add(f"impl-{iteration}-{f}", f"Created {f}", "DERIVED")
+                reasons_add(f"impl-{iteration}-{f}", f"Created {f}", label="DERIVED", source=f)
 
         # Review (skip if effort level is minimal)
         if skip_review:
@@ -1722,17 +1652,17 @@ def run_iteration(
             )
             print(f"\n{results['reviewer']}\n")
 
-        # Beliefs: register reviewer issues as WARNINGs
-        if _beliefs_registry_path().exists():
+        # Reasons: register reviewer issues as WARNINGs
+        if get_reasons_db().exists():
             for i, issue in enumerate(
                 review_result.get("verdict", {}).get("open_issues", [])
             ):
-                beliefs_add(
+                reasons_add(
                     f"review-warn-{iteration}-{inner_iteration}-{i+1}",
                     issue[:200],
-                    "WARNING",
+                    label="WARNING",
                 )
-            beliefs_check_refs()
+            reasons_check_stale()
 
         if review_result["approved"]:
             print("  [Reviewer APPROVED - proceeding to tester]")
@@ -1814,19 +1744,19 @@ def run_iteration(
         )
         print(f"\n{results['tester']}\n")
 
-        # Beliefs: register test results as OBSERVATIONs
-        if _beliefs_registry_path().exists():
+        # Reasons: register test results as OBSERVATIONs
+        if get_reasons_db().exists():
             status = test_result.get("verdict", {}).get("status", "UNKNOWN")
-            beliefs_add(
-                f"test-{iteration}-{tester_iteration}", f"Tests {status}", "OBSERVATION"
+            reasons_add(
+                f"test-{iteration}-{tester_iteration}", f"Tests {status}", label="OBSERVATION"
             )
             for i, issue in enumerate(
                 test_result.get("verdict", {}).get("open_issues", [])
             ):
-                beliefs_add(
+                reasons_add(
                     f"test-warn-{iteration}-{tester_iteration}-{i+1}",
                     issue[:200],
-                    "WARNING",
+                    label="WARNING",
                 )
 
         if results["tests_passed"]:
@@ -1870,13 +1800,13 @@ def run_iteration(
                 f"- {issue}" for issue in results["unresolved_issues"]
             )
 
-        # Inject beliefs compact summary if available
-        beliefs_summary = beliefs_compact(500)
-        if beliefs_summary:
-            usage_for_user += f"\n\nBELIEFS STATE:\n{beliefs_summary}"
+        # Inject reasons compact summary if available
+        reasons_summary = reasons_compact(500)
+        if reasons_summary:
+            usage_for_user += f"\n\nBELIEFS STATE:\n{reasons_summary}"
 
-        # Check for active warnings from beliefs
-        beliefs_warnings = beliefs_list_warnings()
+        # Check for active warnings from reasons
+        beliefs_warnings = reasons_list_warnings()
 
         user_result = user(
             results["implementer"],
@@ -2163,8 +2093,12 @@ def run_pipeline(
     # Initialize .sdlc-loop/ directory structure
     init_sdlc_dir()
 
-    # Initialize beliefs system if available
-    beliefs_init()
+    # Initialize reasons database
+    reasons_init()
+
+    # Set reasons DB path for agent prompt injection
+    from .agent import set_reasons_db as set_agent_reasons_db
+    set_agent_reasons_db(get_reasons_db())
 
     # Load shared understanding if provided
     shared_understanding = None
@@ -2492,6 +2426,7 @@ def main():
         print(
             "  --code-review         Run code-review review-loop after PR creation (requires --github-pr)"
         )
+        print("  --reasons-db PATH     Path to reasons database (from code-expert)")
         print("  --beliefs PATH        Beliefs file for code-review (from code-expert)")
         print(
             "  --review-model NAME   Model for code-review (repeatable, default: claude + gemini)"
@@ -2567,6 +2502,7 @@ def main():
     github_pr = False  # Create GitHub PR after run
     code_review = False  # Run code-review after PR creation
     beliefs_path = None  # Beliefs file for code-review
+    reasons_db_path = None  # Reasons database path
     review_models = []  # Models to use for code-review (e.g. claude, gemini)
     repo_path = None  # Code repo path from --repo
     branch_name = None  # Override branch name
@@ -2645,6 +2581,14 @@ def main():
         code_review = True
         args = args[:idx] + args[idx + 1 :]
 
+    if "--reasons-db" in args:
+        idx = args.index("--reasons-db")
+        reasons_db_path = os.path.expanduser(args[idx + 1])
+        if not os.path.isfile(reasons_db_path):
+            print(f"Error: Reasons database not found: {reasons_db_path}")
+            sys.exit(1)
+        args = args[:idx] + args[idx + 2 :]
+
     if "--beliefs" in args:
         idx = args.index("--beliefs")
         beliefs_path = os.path.expanduser(args[idx + 1])
@@ -2677,6 +2621,10 @@ def main():
     # Set the target branch (default: main)
     if branch_name:
         set_target_branch(branch_name)
+
+    # Set external reasons database if provided
+    if reasons_db_path:
+        set_reasons_db(Path(reasons_db_path))
 
     # Add GitLab remote if specified
     repo = get_repo_root()

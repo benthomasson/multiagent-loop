@@ -60,6 +60,9 @@ _target_branch = "main"
 # Additional read-only context directories (set via --context-dir)
 _context_dirs: list[str] = []
 
+# Reasons database path for belief queries
+_reasons_db_path: Path | None = None
+
 
 def set_target_branch(branch: str) -> None:
     """Set the target branch for work."""
@@ -81,6 +84,39 @@ def set_context_dirs(dirs: list[str]) -> None:
 def get_context_dirs() -> list[str]:
     """Get additional read-only context directories."""
     return _context_dirs
+
+
+def set_reasons_db(path: Path) -> None:
+    """Set the reasons database path for agent prompt injection."""
+    global _reasons_db_path
+    _reasons_db_path = path
+
+
+def get_reasons_instructions() -> str:
+    """Return prompt section with read-only reasons CLI commands."""
+    if _reasons_db_path is None or not _reasons_db_path.exists():
+        return ""
+    db = _reasons_db_path
+    return f"""
+## BELIEFS / REASONS SYSTEM
+
+You have access to a belief tracking database via the `reasons` CLI.
+Use it to query what is known, what warnings exist, and what decisions were made.
+
+Database path: {db}
+
+Available commands (via Bash):
+  reasons --db {db} search "query"        # Search beliefs by keyword
+  reasons --db {db} compact --budget 500  # Summarize current belief state
+  reasons --db {db} list --status IN      # List all active beliefs
+  reasons --db {db} list-gated            # Find beliefs blocked by active problems
+  reasons --db {db} explain NODE_ID       # Explain why a belief is IN or OUT
+  reasons --db {db} show NODE_ID          # Show full details of a belief
+  reasons --db {db} ask "question"        # Ask a question about beliefs
+
+Do NOT use: add, retract, assert, init, or any write commands.
+The supervisor manages belief registration.
+"""
 
 
 # Logging
@@ -191,24 +227,24 @@ def show_status() -> None:
 # Agent permissions configuration
 AGENT_PERMISSIONS = {
     "understand": {
-        "allowed_tools": ["Read", "Glob", "Grep"],
+        "allowed_tools": ["Read", "Glob", "Grep", "Bash"],
         "can_write": False,
-        "description": "Can read files for context gathering",
+        "description": "Can read files for context gathering, query beliefs",
     },
     "planner": {
-        "allowed_tools": ["Read", "Glob", "Grep", "Write"],
+        "allowed_tools": ["Read", "Glob", "Grep", "Write", "Bash"],
         "can_write": True,
-        "description": "Can read codebase, writes plan to their directory",
+        "description": "Can read codebase, writes plan, query beliefs",
     },
     "implementer": {
-        "allowed_tools": ["Read", "Write", "Edit", "Glob", "Grep"],
+        "allowed_tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
         "can_write": True,
-        "description": "Can read/write/edit files in the project",
+        "description": "Can read/write/edit files, query beliefs",
     },
     "reviewer": {
-        "allowed_tools": ["Read", "Glob", "Grep", "Write"],
+        "allowed_tools": ["Read", "Glob", "Grep", "Write", "Bash"],
         "can_write": True,
-        "description": "Can read files for review, writes review to their directory",
+        "description": "Can read files for review, writes review, query beliefs",
     },
     "tester": {
         "allowed_tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
@@ -372,11 +408,13 @@ The following files are available from previous stages:
 {message}
 """
 
+    reasons_section = get_reasons_instructions()
+
     full_prompt += f"""
 You are working directly in the project at: {repo}
 Write any SDLC output files (plans, reviews, reports) to: {agent_artifact_dir}
 Your working directory is {agent_cwd}.
-{ref_dirs_section}"""
+{ref_dirs_section}{reasons_section}"""
 
     cmd = ["claude", "-p", full_prompt]
 
