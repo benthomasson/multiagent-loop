@@ -1,9 +1,10 @@
-"""Tests for reasons.py CLI wrapper module."""
+"""Tests for reasons.py CLI wrapper and agent.py reasons integration."""
 
 from pathlib import Path
 from unittest.mock import patch, MagicMock
 import subprocess
 
+from ftl_sdlc_loop.agent import AGENT_PERMISSIONS, get_reasons_instructions
 from ftl_sdlc_loop.reasons import (
     get_reasons_db,
     set_reasons_db,
@@ -180,3 +181,70 @@ def test_reasons_list_gated_returns_output():
     mock_result = subprocess.CompletedProcess([], 0, "gated: node-1", "")
     with patch("ftl_sdlc_loop.reasons._run_reasons", return_value=mock_result):
         assert reasons_list_gated() == "gated: node-1"
+
+
+# --- agent.py: AGENT_PERMISSIONS ---
+
+
+def test_all_agents_have_bash_access():
+    """Every agent role has some form of Bash access for reasons queries."""
+    for role, perms in AGENT_PERMISSIONS.items():
+        tools = perms["allowed_tools"]
+        has_bash = any(t == "Bash" or t.startswith("Bash(") for t in tools)
+        assert has_bash, f"{role} is missing Bash access"
+
+
+def test_belief_only_agents_have_scoped_bash():
+    """Agents that only need beliefs get Bash(reasons*), not full Bash."""
+    scoped_roles = ["understand", "planner", "implementer", "reviewer"]
+    for role in scoped_roles:
+        tools = AGENT_PERMISSIONS[role]["allowed_tools"]
+        assert "Bash(reasons*)" in tools, f"{role} should have Bash(reasons*)"
+        assert "Bash" not in tools, f"{role} should not have unscoped Bash"
+
+
+def test_shell_agents_have_full_bash():
+    """Tester and user need full Bash for running tests and using software."""
+    for role in ["tester", "user"]:
+        tools = AGENT_PERMISSIONS[role]["allowed_tools"]
+        assert "Bash" in tools, f"{role} should have full Bash"
+
+
+# --- agent.py: get_reasons_instructions() ---
+
+
+def test_get_reasons_instructions_returns_empty_when_db_missing(tmp_path):
+    """Returns empty string when the reasons DB does not exist."""
+    db = tmp_path / "nonexistent.db"
+    with patch("ftl_sdlc_loop.reasons.get_reasons_db", return_value=db):
+        assert get_reasons_instructions() == ""
+
+
+def test_get_reasons_instructions_contains_db_path(tmp_path):
+    """Returned prompt includes the database path."""
+    db = tmp_path / "reasons.db"
+    db.write_text("exists")
+    with patch("ftl_sdlc_loop.reasons.get_reasons_db", return_value=db):
+        result = get_reasons_instructions()
+        assert str(db) in result
+
+
+def test_get_reasons_instructions_includes_read_commands(tmp_path):
+    """Returned prompt includes the expected read-only commands."""
+    db = tmp_path / "reasons.db"
+    db.write_text("exists")
+    with patch("ftl_sdlc_loop.reasons.get_reasons_db", return_value=db):
+        result = get_reasons_instructions()
+        for cmd in ["search", "compact", "list", "list-gated", "explain", "show", "ask"]:
+            assert cmd in result, f"Missing read command: {cmd}"
+
+
+def test_get_reasons_instructions_prohibits_write_commands(tmp_path):
+    """Returned prompt explicitly prohibits write commands."""
+    db = tmp_path / "reasons.db"
+    db.write_text("exists")
+    with patch("ftl_sdlc_loop.reasons.get_reasons_db", return_value=db):
+        result = get_reasons_instructions()
+        assert "Do NOT use" in result
+        for cmd in ["add", "retract", "init"]:
+            assert cmd in result, f"Missing prohibition for: {cmd}"
