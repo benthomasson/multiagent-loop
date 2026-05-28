@@ -83,11 +83,9 @@ def reasons_compact(budget: int = 500) -> str | None:
 
 
 def reasons_list_warnings() -> str | None:
-    result = _run_reasons("list", "--status", "IN")
-    if result.returncode != 0 or not result.stdout.strip():
-        return None
-    lines = [line for line in result.stdout.strip().split("\n") if "warn" in line.lower()]
-    return "\n".join(lines) if lines else None
+    result = _run_reasons("list", "--status", "IN", "--label", "WARNING")
+    output = result.stdout.strip()
+    return output if output else None
 
 
 def reasons_check_stale() -> None:

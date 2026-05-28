@@ -129,20 +129,19 @@ def test_reasons_compact_returns_none_on_empty():
         assert reasons_compact() is None
 
 
-def test_reasons_list_warnings_filters():
-    """reasons_list_warnings returns only lines containing 'warn'."""
-    output = "review-warn-1-1 | WARNING | Some issue\nplan-1-1 | AXIOM | Decision\n"
+def test_reasons_list_warnings_passes_label_flag():
+    """reasons_list_warnings uses --label WARNING for precise filtering."""
+    output = "review-warn-1-1 | WARNING | Some issue"
     mock_result = subprocess.CompletedProcess([], 0, output, "")
-    with patch("ftl_sdlc_loop.reasons._run_reasons", return_value=mock_result):
+    with patch("ftl_sdlc_loop.reasons._run_reasons", return_value=mock_result) as mock:
         result = reasons_list_warnings()
-        assert result is not None
-        assert "WARNING" in result
-        assert "AXIOM" not in result
+        mock.assert_called_once_with("list", "--status", "IN", "--label", "WARNING")
+        assert result == output
 
 
 def test_reasons_list_warnings_none_when_no_warnings():
     """reasons_list_warnings returns None when no warning lines found."""
-    output = "plan-1-1 | AXIOM | Decision\nimpl-1-1 | DERIVED | Code\n"
+    output = ""
     mock_result = subprocess.CompletedProcess([], 0, output, "")
     with patch("ftl_sdlc_loop.reasons._run_reasons", return_value=mock_result):
         assert reasons_list_warnings() is None
