@@ -20,95 +20,49 @@ All SDLC artifacts are stored under .sdlc-loop/ which is gitignored.
 import os
 import subprocess
 import sys
-from datetime import datetime
 from pathlib import Path
 
-# Repo root — the actual code repository agents work in
-_repo_root: Path | None = None
+from .config import (
+    get_agents_dir,
+    get_artifacts_dir,
+    get_context_dirs,
+    get_repo_root,
+    get_sdlc_dir,
+    log,
+    log_separator,
+    set_context_dirs,
+    set_repo_root,
+    set_target_branch,
+    get_target_branch,
+)
+from .reasons import get_reasons_db
 
 
-def set_repo_root(path: Path) -> None:
-    """Set the target code repo root."""
-    global _repo_root
-    _repo_root = path
+def get_reasons_instructions() -> str:
+    """Return prompt section with read-only reasons CLI commands."""
+    db = get_reasons_db()
+    if not db.exists():
+        return ""
+    return f"""
+## BELIEFS / REASONS SYSTEM
 
+You have access to a belief tracking database via the `reasons` CLI.
+Use it to query what is known, what warnings exist, and what decisions were made.
 
-def get_repo_root() -> Path:
-    """Get the target code repo root. Defaults to CWD."""
-    return _repo_root or Path.cwd()
+Database path: {db}
 
+Available commands (via Bash):
+  reasons --db {db} search "query"        # Search beliefs by keyword
+  reasons --db {db} compact --budget 500  # Summarize current belief state
+  reasons --db {db} list --status IN      # List all active beliefs
+  reasons --db {db} list-gated            # Find beliefs blocked by active problems
+  reasons --db {db} explain NODE_ID       # Explain why a belief is IN or OUT
+  reasons --db {db} show NODE_ID          # Show full details of a belief
+  reasons --db {db} ask "question"        # Ask a question about beliefs
 
-def get_sdlc_dir() -> Path:
-    """Get the .sdlc-loop directory for SDLC state."""
-    return get_repo_root() / ".sdlc-loop"
-
-
-def get_artifacts_dir() -> Path:
-    """Get the artifacts directory for SDLC documents."""
-    return get_sdlc_dir() / "artifacts"
-
-
-
-def get_agents_dir() -> Path:
-    """Get the agents session directory under .sdlc-loop/."""
-    return get_sdlc_dir() / "agents"
-
-
-# Target branch for commits (default: main)
-_target_branch = "main"
-
-# Additional read-only context directories (set via --context-dir)
-_context_dirs: list[str] = []
-
-
-def set_target_branch(branch: str) -> None:
-    """Set the target branch for work."""
-    global _target_branch
-    _target_branch = branch
-
-
-def get_target_branch() -> str:
-    """Get the target branch."""
-    return _target_branch
-
-
-def set_context_dirs(dirs: list[str]) -> None:
-    """Set additional read-only context directories for agents."""
-    global _context_dirs
-    _context_dirs = dirs
-
-
-def get_context_dirs() -> list[str]:
-    """Get additional read-only context directories."""
-    return _context_dirs
-
-
-# Logging
-VERBOSE = True
-_log_file_handle = None
-
-
-def _get_log_file():
-    """Get or create log file handle."""
-    global _log_file_handle
-    if _log_file_handle is None:
-        log_file = get_sdlc_dir() / "multiagent.log"
-        log_file.parent.mkdir(parents=True, exist_ok=True)
-        _log_file_handle = open(log_file, "a")
-    return _log_file_handle
-
-
-def log(msg: str, level: str = "INFO"):
-    """Log a message with timestamp to stderr and file."""
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    log_line = f"[{timestamp}] [{level}] {msg}"
-
-    f = _get_log_file()
-    f.write(log_line + "\n")
-    f.flush()
-
-    if VERBOSE or level in ["ERROR", "WARN"]:
-        print(log_line, file=sys.stderr)
+Do NOT use: add, retract, assert, init, or any write commands.
+The supervisor manages belief registration.
+"""
 
 
 # PID file management
@@ -191,24 +145,24 @@ def show_status() -> None:
 # Agent permissions configuration
 AGENT_PERMISSIONS = {
     "understand": {
-        "allowed_tools": ["Read", "Glob", "Grep"],
+        "allowed_tools": ["Read", "Glob", "Grep", "Bash(reasons*)"],
         "can_write": False,
-        "description": "Can read files for context gathering",
+        "description": "Can read files for context gathering, query beliefs",
     },
     "planner": {
-        "allowed_tools": ["Read", "Glob", "Grep", "Write"],
+        "allowed_tools": ["Read", "Glob", "Grep", "Write", "Bash(reasons*)"],
         "can_write": True,
-        "description": "Can read codebase, writes plan to their directory",
+        "description": "Can read codebase, writes plan, query beliefs",
     },
     "implementer": {
-        "allowed_tools": ["Read", "Write", "Edit", "Glob", "Grep"],
+        "allowed_tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash(reasons*)"],
         "can_write": True,
-        "description": "Can read/write/edit files in the project",
+        "description": "Can read/write/edit files, query beliefs",
     },
     "reviewer": {
-        "allowed_tools": ["Read", "Glob", "Grep", "Write"],
+        "allowed_tools": ["Read", "Glob", "Grep", "Write", "Bash(reasons*)"],
         "can_write": True,
-        "description": "Can read files for review, writes review to their directory",
+        "description": "Can read files for review, writes review, query beliefs",
     },
     "tester": {
         "allowed_tools": ["Read", "Write", "Edit", "Glob", "Grep", "Bash"],
@@ -230,15 +184,6 @@ def git_cmd(args: list[str], cwd: Path) -> subprocess.CompletedProcess:
     return subprocess.run(
         ["git"] + args, cwd=cwd, env=env, capture_output=True, text=True
     )
-
-
-def log_separator(title: str = "NEW RUN"):
-    """Add a visible separator in the log file."""
-    timestamp = datetime.now().strftime("%Y-%m-%d %H:%M:%S")
-    separator = f"\n{'='*60}\n{title} - {timestamp}\n{'='*60}\n"
-    f = _get_log_file()
-    f.write(separator)
-    f.flush()
 
 
 def setup_agent_workspace(role: str) -> Path:
@@ -372,11 +317,13 @@ The following files are available from previous stages:
 {message}
 """
 
+    reasons_section = get_reasons_instructions()
+
     full_prompt += f"""
 You are working directly in the project at: {repo}
 Write any SDLC output files (plans, reviews, reports) to: {agent_artifact_dir}
 Your working directory is {agent_cwd}.
-{ref_dirs_section}"""
+{ref_dirs_section}{reasons_section}"""
 
     cmd = ["claude", "-p", full_prompt]
 

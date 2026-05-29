@@ -26,7 +26,7 @@ import subprocess
 import sys
 from pathlib import Path
 
-from .agent import get_artifacts_dir, get_sdlc_dir
+from .config import get_artifacts_dir, get_sdlc_dir
 
 
 def run_claude(prompt: str, continue_session: bool = False) -> str:
