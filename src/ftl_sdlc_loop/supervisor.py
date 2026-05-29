@@ -34,18 +34,18 @@ import time
 from datetime import datetime
 from pathlib import Path
 
-from .agent import (
+from .config import (
     get_artifacts_dir,
     get_repo_root,
     get_sdlc_dir,
     get_target_branch,
     log,
     log_separator,
-    run_agent,
     set_context_dirs,
     set_repo_root,
     set_target_branch,
 )
+from .agent import run_agent
 
 # Queue file handling for continuous mode
 DEFAULT_QUEUE_PATH = Path("queue.txt")

@@ -9,7 +9,7 @@ import shutil
 import subprocess
 from pathlib import Path
 
-from .agent import get_sdlc_dir, log
+from .config import get_sdlc_dir, log
 
 _reasons_db: Path | None = None
 

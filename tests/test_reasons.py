@@ -215,7 +215,7 @@ def test_shell_agents_have_full_bash():
 def test_get_reasons_instructions_returns_empty_when_db_missing(tmp_path):
     """Returns empty string when the reasons DB does not exist."""
     db = tmp_path / "nonexistent.db"
-    with patch("ftl_sdlc_loop.reasons.get_reasons_db", return_value=db):
+    with patch("ftl_sdlc_loop.agent.get_reasons_db", return_value=db):
         assert get_reasons_instructions() == ""
 
 
@@ -223,7 +223,7 @@ def test_get_reasons_instructions_contains_db_path(tmp_path):
     """Returned prompt includes the database path."""
     db = tmp_path / "reasons.db"
     db.write_text("exists")
-    with patch("ftl_sdlc_loop.reasons.get_reasons_db", return_value=db):
+    with patch("ftl_sdlc_loop.agent.get_reasons_db", return_value=db):
         result = get_reasons_instructions()
         assert str(db) in result
 
@@ -232,7 +232,7 @@ def test_get_reasons_instructions_includes_read_commands(tmp_path):
     """Returned prompt includes the expected read-only commands."""
     db = tmp_path / "reasons.db"
     db.write_text("exists")
-    with patch("ftl_sdlc_loop.reasons.get_reasons_db", return_value=db):
+    with patch("ftl_sdlc_loop.agent.get_reasons_db", return_value=db):
         result = get_reasons_instructions()
         for cmd in ["search", "compact", "list", "list-gated", "explain", "show", "ask"]:
             assert cmd in result, f"Missing read command: {cmd}"
@@ -242,7 +242,7 @@ def test_get_reasons_instructions_prohibits_write_commands(tmp_path):
     """Returned prompt explicitly prohibits write commands."""
     db = tmp_path / "reasons.db"
     db.write_text("exists")
-    with patch("ftl_sdlc_loop.reasons.get_reasons_db", return_value=db):
+    with patch("ftl_sdlc_loop.agent.get_reasons_db", return_value=db):
         result = get_reasons_instructions()
         assert "Do NOT use" in result
         for cmd in ["add", "retract", "init"]:
